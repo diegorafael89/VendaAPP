@@ -1,0 +1,6 @@
+{
+  "name": "AppVenda - Gestão de Vendas e Estoque",
+  "description": "Sistema completo de vendas, controle de estoque, clientes, devedores e relatórios de desempenho mensais com banco de dados seguro e autenticação de usuários.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

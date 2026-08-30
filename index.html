@@ -1,0 +1,1261 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AppVenda - Gestão de Vendas e Estoque</title>
+  <meta name="description" content="Sistema completo de vendas, controle de estoque, clientes, devedores e relatórios de desempenho mensais com banco de dados seguro e autenticação de usuários." />
+  <meta property="og:title" content="AppVenda - Gestão de Vendas e Estoque" />
+  <meta property="og:description" content="Sistema completo de vendas, controle de estoque, clientes, devedores e relatórios de desempenho mensais com banco de dados seguro e autenticação de usuários." />
+
+  <!-- External Stylesheets -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/sweetalert2/11.10.5/sweetalert2.min.css">
+
+  <style>
+    :root {
+      --sidebar-w: 240px;
+      --sidebar-w-collapsed: 70px;
+      --topbar-h: 60px;
+    }
+    [data-bs-theme="dark"] {
+      --bg: #0f1418;
+      --surface: #171e24;
+      --surface2: #1e262d;
+      --line: #2a333b;
+      --text: #e8edf1;
+      --muted: #8a97a1;
+      --accent: #2fbf8f;
+      --accent2: #1f8a66;
+      --card-hover: #222b33;
+    }
+    [data-bs-theme="light"] {
+      --bg: #f4f6f8;
+      --surface: #ffffff;
+      --surface2: #eef1f4;
+      --line: #dde3e8;
+      --text: #1c2530;
+      --muted: #647082;
+      --accent: #1f9d76;
+      --accent2: #177a5c;
+      --card-hover: #f8fafc;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif;
+      transition: background .2s, color .2s;
+      min-height: 100vh;
+    }
+    a { text-decoration: none; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+
+    /* TOPBAR */
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0; height: var(--topbar-h); z-index: 1030;
+      background: var(--surface); border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 18px;
+    }
+    .topbar .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .topbar .brand img { height: 32px; width: 32px; object-fit: cover; border-radius: 8px; }
+    .topbar .actions { display: flex; align-items: center; gap: 14px; }
+    .theme-switch { cursor: pointer; font-size: 18px; color: var(--muted); transition: color .15s; }
+    .theme-switch:hover { color: var(--text); }
+    #btnToggleSidebar { background: none; border: none; color: var(--text); font-size: 20px; padding: 4px 8px; cursor: pointer; }
+
+    /* USER BADGE & AUTH IN TOPBAR */
+    .user-pill {
+      display: flex; align-items: center; gap: 8px; padding: 5px 12px;
+      background: var(--surface2); border: 1px solid var(--line); border-radius: 20px;
+      font-size: 13px; font-weight: 500;
+    }
+    .user-pill .badge-role {
+      font-size: 10.5px; padding: 3px 7px; border-radius: 6px; text-transform: uppercase; font-weight: 700;
+    }
+    .role-admin { background: rgba(47, 191, 143, 0.2); color: var(--accent); }
+    .role-gerente { background: rgba(90, 140, 224, 0.2); color: #5a8ce0; }
+    .role-caixa { background: rgba(224, 165, 58, 0.2); color: #e0a53a; }
+    .role-vendedor { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
+
+    /* SIDEBAR */
+    .sidebar {
+      position: fixed; top: var(--topbar-h); left: 0; bottom: 0; width: var(--sidebar-w); z-index: 1020;
+      background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto;
+      transition: width .2s, transform .2s; padding-top: 10px;
+    }
+    .sidebar.collapsed { width: var(--sidebar-w-collapsed); }
+    .sidebar .nav-link {
+      color: var(--muted); padding: 11px 18px; display: flex; align-items: center; gap: 12px;
+      font-size: 14px; border-left: 3px solid transparent; white-space: nowrap; overflow: hidden;
+      transition: all .15s ease;
+    }
+    .sidebar .nav-link i { width: 22px; text-align: center; font-size: 16px; flex-shrink: 0; }
+    .sidebar .nav-link:hover { background: var(--surface2); color: var(--text); }
+    .sidebar .nav-link.active { color: var(--accent); border-left-color: var(--accent); background: var(--surface2); font-weight: 600; }
+    .sidebar.collapsed .nav-link span { display: none; }
+    .sidebar.collapsed .nav-link { justify-content: center; padding: 12px 0; }
+
+    /* Role-based display in sidebar */
+    .sidebar-section-divider {
+      font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+      padding: 14px 18px 6px; font-weight: 700;
+    }
+    .sidebar.collapsed .sidebar-section-divider { display: none; }
+
+    /* CONTENT */
+    .content-wrap {
+      margin-left: var(--sidebar-w); margin-top: var(--topbar-h); padding: 22px 24px 60px;
+      transition: margin-left .2s; min-height: calc(100vh - var(--topbar-h));
+    }
+    .content-wrap.expanded { margin-left: var(--sidebar-w-collapsed); }
+    @media (max-width: 768px) {
+      .sidebar { transform: translateX(-100%); }
+      .sidebar.show-mobile { transform: translateX(0); }
+      .content-wrap { margin-left: 0 !important; padding: 16px 14px 50px; }
+    }
+
+    .screen { display: none; animation: fadeIn .2s ease; }
+    .screen.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    /* CARDS & CONTAINERS */
+    .stat-card {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
+      display: flex; align-items: center; gap: 14px; height: 100%; transition: transform .15s;
+    }
+    .stat-card:hover { border-color: rgba(47, 191, 143, 0.4); }
+    .stat-card .icon {
+      width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center;
+      font-size: 20px; flex-shrink: 0;
+    }
+    .stat-card .label { font-size: 12px; color: var(--muted); margin-bottom: 2px; font-weight: 500; }
+    .stat-card .value { font-size: 20px; font-weight: 700; }
+
+    .card-modern {
+      background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px;
+    }
+
+    /* TABLES */
+    .table-modern {
+      background: var(--surface); border-radius: 14px; overflow: hidden; border: 1px solid var(--line);
+    }
+    .table-modern table { margin-bottom: 0; color: var(--text); }
+    .table-modern thead { background: var(--surface2); }
+    .table-modern th {
+      font-size: 11.5px; text-transform: uppercase; color: var(--muted); font-weight: 600;
+      border-bottom: 1px solid var(--line); padding: 12px 14px;
+    }
+    .table-modern td { padding: 12px 14px; vertical-align: middle; border-color: var(--line); font-size: 13.5px; }
+    .table-modern tbody tr:hover { background: var(--card-hover); }
+    .thumb-sm { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; background: var(--surface2); }
+
+    .badge-status-ok { background: rgba(47, 191, 143, .15); color: var(--accent); font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+    .badge-status-low { background: rgba(224, 165, 58, .18); color: #e0a53a; font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+    .badge-status-out { background: rgba(224, 90, 78, .18); color: #e05a4e; font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+    .badge-pago { background: rgba(47, 191, 143, .15); color: var(--accent); font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+    .badge-pendente { background: rgba(224, 165, 58, .18); color: #e0a53a; font-weight: 600; padding: 4px 8px; border-radius: 6px; }
+
+    /* FORMS */
+    .form-label { font-size: 12.5px; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
+    .form-control, .form-select {
+      background: var(--surface2); border: 1px solid var(--line); color: var(--text); border-radius: 8px;
+    }
+    .form-control:focus, .form-select:focus {
+      background: var(--surface2); color: var(--text); border-color: var(--accent);
+      box-shadow: 0 0 0 .2rem rgba(47, 191, 143, .15);
+    }
+    .modal-content { background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 14px; }
+    .modal-header { border-bottom: 1px solid var(--line); }
+    .modal-footer { border-top: 1px solid var(--line); }
+    .btn-accent { background: var(--accent); border-color: var(--accent); color: #06231a; font-weight: 600; border-radius: 8px; }
+    .btn-accent:hover { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+
+    .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 22px 0 10px; font-weight: 700; }
+
+    /* CART & SUGGESTIONS */
+    .cart-item {
+      display: flex; align-items: center; gap: 10px; background: var(--surface2); border: 1px solid var(--line);
+      border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+    }
+    .cart-item .qty-input { width: 68px; }
+    .produto-suggestion {
+      position: absolute; z-index: 50; background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+      width: 100%; max-height: 260px; overflow-y: auto; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    }
+    .produto-suggestion .item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+    .produto-suggestion .item:hover { background: var(--surface2); }
+
+    /* QUICK FILTER CHIPS */
+    .filter-chip {
+      background: var(--surface2); border: 1px solid var(--line); color: var(--muted); border-radius: 20px;
+      padding: 4px 12px; font-size: 12px; cursor: pointer; transition: all .15s; font-weight: 500;
+    }
+    .filter-chip:hover { color: var(--text); border-color: var(--accent); }
+    .filter-chip.active { background: var(--accent); color: #06231a; border-color: var(--accent); font-weight: 700; }
+
+    /* PRINT STYLES */
+    #printArea { display: none; }
+    @media print {
+      body * { visibility: hidden; }
+      #printArea, #printArea * { visibility: visible; }
+      #printArea { display: block !important; position: absolute; top: 0; left: 0; width: 100%; padding: 20px; color: #000; background: #fff; }
+      #printArea table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+      #printArea th, #printArea td { border: 1px solid #999; padding: 8px; font-size: 12px; color: #000; }
+      #printArea thead { background: #eee; }
+    }
+    .empty-state { text-align: center; color: var(--muted); padding: 40px 10px; font-size: 13.5px; }
+  </style>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<header class="topbar" id="appTopbar">
+  <div class="d-flex align-items-center gap-3">
+    <button id="btnToggleSidebar" title="Alternar menu lateral"><i class="fa-solid fa-bars"></i></button>
+    <div class="brand">
+      <img id="topbarLogo" src="" style="display:none;" alt="Logotipo">
+      <span id="topbarNome">Loja de Suplementos</span>
+    </div>
+    <span class="badge bg-success-subtle text-success border border-success-subtle d-none d-md-inline-block" style="font-size: 11px;">
+      <i class="fa-solid fa-database me-1"></i> Banco de Dados Seguro (SQLite)
+    </span>
+  </div>
+  <div class="actions">
+    <!-- User status & Profile pill -->
+    <div class="user-pill" id="userProfilePill" style="cursor: pointer;" onclick="openUserMenuModal()" title="Gerenciar conta">
+      <i class="fa-solid fa-circle-user text-accent" style="font-size: 16px;"></i>
+      <span id="topbarUserName">Carregando...</span>
+      <span class="badge-role role-admin" id="topbarUserRole">Admin</span>
+    </div>
+
+    <button class="btn btn-sm btn-outline-danger" id="btnLogout" onclick="logoutUsuario()" title="Sair do sistema">
+      <i class="fa-solid fa-arrow-right-from-bracket"></i>
+    </button>
+    <i class="fa-solid fa-moon theme-switch" id="themeToggle" title="Alternar tema claro/escuro"></i>
+  </div>
+</header>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <nav class="nav flex-column">
+    <a class="nav-link active" data-tab="dashboard" href="#" id="nav-dashboard">
+      <i class="fa-solid fa-chart-line"></i><span>Dashboard</span>
+    </a>
+    <a class="nav-link" data-tab="produtos" href="#" id="nav-produtos">
+      <i class="fa-solid fa-tags"></i><span>Produtos</span>
+    </a>
+    <a class="nav-link" data-tab="estoque" href="#" id="nav-estoque">
+      <i class="fa-solid fa-boxes-stacked"></i><span>Estoque</span>
+    </a>
+    <!-- VENDAS TAB: Ocultada automaticamente para perfil vendedor se a política estiver ativa -->
+    <a class="nav-link" data-tab="vendas" href="#" id="nav-vendas">
+      <i class="fa-solid fa-cash-register"></i><span>Vendas (PDV)</span>
+    </a>
+    <a class="nav-link" data-tab="clientes" href="#" id="nav-clientes">
+      <i class="fa-solid fa-users"></i><span>Clientes</span>
+    </a>
+    <a class="nav-link" data-tab="devedores" href="#" id="nav-devedores">
+      <i class="fa-solid fa-hand-holding-dollar"></i><span>Devedores (Fiado)</span>
+    </a>
+    <a class="nav-link" data-tab="comissoes" href="#" id="nav-comissoes">
+      <i class="fa-solid fa-percent"></i><span>Comissões</span>
+    </a>
+    <!-- RELATÓRIOS: Inclui o novo Relatório de Desempenho Mensal Detalhado -->
+    <a class="nav-link" data-tab="relatorios" href="#" id="nav-relatorios">
+      <i class="fa-solid fa-file-invoice-dollar"></i><span>Relatórios & Métricas</span>
+    </a>
+    <div class="sidebar-section-divider" id="adminDivider">Administração</div>
+    <a class="nav-link" data-tab="usuarios" href="#" id="nav-usuarios">
+      <i class="fa-solid fa-user-shield"></i><span>Gestão de Usuários</span>
+    </a>
+    <a class="nav-link" data-tab="config" href="#" id="nav-config">
+      <i class="fa-solid fa-gear"></i><span>Configurações</span>
+    </a>
+  </nav>
+</aside>
+
+<!-- MAIN CONTENT WRAP -->
+<main class="content-wrap" id="contentWrap">
+
+  <!-- AVISO DE POLÍTICA: SE VENDEDOR TENTAR ACESSAR VENDAS -->
+  <div id="bannerVendedorOculto" class="alert alert-warning d-none mb-3" role="alert">
+    <i class="fa-solid fa-shield-halved me-2"></i>
+    <strong>Acesso Restrito:</strong> A tela de registro de vendas está configurada como restrita e oculta para o perfil Vendedor. Você pode consultar o catálogo de produtos e cadastrar clientes.
+  </div>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: DASHBOARD                                                         -->
+  <!-- ====================================================================== -->
+  <section id="tab-dashboard" class="screen active">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h4 class="mb-0 fw-bold">Dashboard Executivo</h4>
+      <button class="btn btn-sm btn-outline-secondary" onclick="carregarDashboard()"><i class="fa-solid fa-rotate me-1"></i> Atualizar dados</button>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatProdutos">
+          <div class="icon" style="background:rgba(47,191,143,.15);color:var(--accent);"><i class="fa-solid fa-tags"></i></div>
+          <div><div class="label">Produtos cadastrados</div><div class="value" id="dQtdProdutos">0</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatEstoque">
+          <div class="icon" style="background:rgba(90,140,224,.15);color:#5a8ce0;"><i class="fa-solid fa-warehouse"></i></div>
+          <div><div class="label">Valor do estoque</div><div class="value" id="dValorEstoque">R$ 0,00</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatEstoqueBaixo">
+          <div class="icon" style="background:rgba(224,165,58,.15);color:#e0a53a;"><i class="fa-solid fa-triangle-exclamation"></i></div>
+          <div><div class="label">Estoque baixo</div><div class="value" id="dEstoqueBaixo">0</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatDevedores">
+          <div class="icon" style="background:rgba(224,90,78,.15);color:#e05a4e;"><i class="fa-solid fa-hand-holding-dollar"></i></div>
+          <div><div class="label">Devedores pendentes</div><div class="value" id="dQtdDevedores">0</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatHoje">
+          <div class="icon" style="background:rgba(47,191,143,.15);color:var(--accent);"><i class="fa-solid fa-sack-dollar"></i></div>
+          <div><div class="label">Vendido hoje</div><div class="value" id="dVendidoHoje">R$ 0,00</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatMes">
+          <div class="icon" style="background:rgba(47,191,143,.15);color:var(--accent);"><i class="fa-solid fa-calendar-days"></i></div>
+          <div><div class="label">Vendido no mês</div><div class="value" id="dVendidoMes">R$ 0,00</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatLucro">
+          <div class="icon" style="background:rgba(47,191,143,.15);color:var(--accent);"><i class="fa-solid fa-chart-pie"></i></div>
+          <div><div class="label">Lucro estimado (mês)</div><div class="value" id="dLucroMes">R$ 0,00</div></div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="stat-card" id="cardStatReceber">
+          <div class="icon" style="background:rgba(224,90,78,.15);color:#e05a4e;"><i class="fa-solid fa-file-invoice-dollar"></i></div>
+          <div><div class="label">A receber (fiado)</div><div class="value" id="dValorReceber">R$ 0,00</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row g-3 mt-1">
+      <div class="col-lg-7">
+        <div class="card-modern" id="cardGraficoMes">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span class="section-title mt-0 mb-0">Evolução diária de vendas no mês</span>
+            <small class="text-muted" id="dashMesAnoLabel">Mês atual</small>
+          </div>
+          <canvas id="chartVendasMes" height="150"></canvas>
+        </div>
+      </div>
+      <div class="col-lg-5">
+        <div class="card-modern" id="cardUltimasVendas">
+          <div class="section-title mt-0 mb-2">Últimas vendas realizadas</div>
+          <div id="dashUltimasVendas">
+            <div class="empty-state">Carregando dados...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: PRODUTOS                                                          -->
+  <!-- ====================================================================== -->
+  <section id="tab-produtos" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h4 class="mb-0 fw-bold">Catálogo de Produtos</h4>
+      <button class="btn btn-accent" id="btnNovoProduto" onclick="openProdutoModal()"><i class="fa-solid fa-plus me-1"></i> Novo produto</button>
+    </div>
+    <div class="row g-2 mb-3">
+      <div class="col-md-8">
+        <input class="form-control" id="buscaProduto" placeholder="Buscar por nome, marca, categoria ou código de barras..." oninput="renderProdutosFiltrados()">
+      </div>
+      <div class="col-md-4">
+        <select class="form-select" id="filtroCategoriaProduto" onchange="renderProdutosFiltrados()">
+          <option value="">Todas as categorias</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-modern table-responsive">
+      <table class="table align-middle mb-0" id="tabelaProdutos">
+        <thead><tr>
+          <th>Foto</th><th>Nome</th><th>Marca</th><th>Categoria</th><th>Sabor/Peso</th>
+          <th class="text-end">Custo</th><th class="text-end">Venda</th><th class="text-end">Margem</th>
+          <th class="text-end">Estoque</th><th class="text-center">Ações</th>
+        </tr></thead>
+        <tbody id="tbodyProdutos">
+          <tr><td colspan="10" class="empty-state">Carregando produtos...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: ESTOQUE                                                           -->
+  <!-- ====================================================================== -->
+  <section id="tab-estoque" class="screen">
+    <h4 class="mb-3 fw-bold">Controle de Estoque</h4>
+    <ul class="nav nav-pills mb-3" id="estoqueTabs">
+      <li class="nav-item"><a class="nav-link active" data-est="visao" href="#" id="tabEstoqueVisao">Visão geral</a></li>
+      <li class="nav-item"><a class="nav-link" data-est="mov" href="#" id="tabEstoqueMov">Movimentar</a></li>
+      <li class="nav-item"><a class="nav-link" data-est="hist" href="#" id="tabEstoqueHist">Histórico de movimentações</a></li>
+    </ul>
+
+    <div id="est-visao">
+      <div class="card-modern mb-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div>
+          <div class="label text-muted" style="font-size:12px;">Valor total imobilizado em estoque</div>
+          <div class="fs-4 fw-bold" id="estValorTotal">R$ 0,00</div>
+        </div>
+        <div>
+          <button class="btn btn-sm btn-outline-secondary" onclick="carregarEstoque()"><i class="fa-solid fa-arrows-rotate me-1"></i> Atualizar</button>
+        </div>
+      </div>
+      <div class="table-modern table-responsive">
+        <table class="table align-middle mb-0" id="tabelaEstoqueVisao">
+          <thead><tr><th>Produto</th><th class="text-end">Estoque</th><th class="text-end">Mínimo</th><th class="text-end">Custo unit.</th><th class="text-end">Valor total</th><th>Status</th></tr></thead>
+          <tbody id="tbodyEstoqueVisao"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="est-mov" style="display:none;">
+      <div class="card-modern" style="max-width:560px;">
+        <h5 class="mb-3 fw-bold">Registrar Entrada / Saída de Mercadoria</h5>
+        <div class="mb-3"><label class="form-label">Tipo de movimentação</label>
+          <select class="form-select" id="movTipo" onchange="toggleMovCampos()">
+            <option value="entrada">Entrada (compra de fornecedor)</option>
+            <option value="saida">Saída manual (avaria, perda, uso interno)</option>
+            <option value="ajuste">Ajuste de inventário (corrigir contagem)</option>
+          </select>
+        </div>
+        <div class="mb-3"><label class="form-label">Produto</label>
+          <select class="form-select" id="movProduto"></select>
+        </div>
+        <div class="row">
+          <div class="col-6 mb-3" id="movQtdWrap"><label class="form-label" id="movQtdLabel">Quantidade</label>
+            <input type="number" class="form-control" id="movQtd" min="0" step="1" placeholder="Qtd"></div>
+          <div class="col-6 mb-3" id="movCustoWrap"><label class="form-label">Custo unitário (R$)</label>
+            <input type="number" class="form-control" id="movCusto" min="0" step="0.01" placeholder="0.00"></div>
+        </div>
+        <div class="mb-3"><label class="form-label">Motivo / Fornecedor / Observação</label>
+          <input class="form-control" id="movMotivo" placeholder="Ex: Fornecedor Max Nutrition, Nota fiscal #123..."></div>
+        <button class="btn btn-accent w-100" id="btnConfirmarMov" onclick="salvarMovimentacao()"><i class="fa-solid fa-check me-1"></i> Confirmar movimentação no banco</button>
+      </div>
+    </div>
+
+    <div id="est-hist" style="display:none;">
+      <div class="table-modern table-responsive">
+        <table class="table align-middle mb-0" id="tabelaHistoricoEstoque">
+          <thead><tr><th>Data/Hora</th><th>Produto</th><th>Tipo</th><th class="text-end">Qtd</th><th>Motivo</th></tr></thead>
+          <tbody id="tbodyHistoricoEstoque"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: VENDAS (PDV)                                                      -->
+  <!-- ====================================================================== -->
+  <section id="tab-vendas" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h4 class="mb-0 fw-bold">Ponto de Venda (PDV)</h4>
+      <span class="badge bg-secondary-subtle text-secondary" id="badgeOperadorCaixa">Caixa Livre</span>
+    </div>
+
+    <div class="row g-3">
+      <!-- Carrinho de Compras -->
+      <div class="col-lg-7">
+        <div class="card-modern position-relative" id="cardCarrinhoVenda">
+          <label class="form-label">Buscar produto (Nome, Marca ou Código de barras)</label>
+          <div class="input-group mb-2">
+            <span class="input-group-text"><i class="fa-solid fa-magnifying-glass"></i></span>
+            <input class="form-control" id="vendaBusca" placeholder="Digite para buscar ou escaneie o código..." oninput="buscarProdutoVenda()" autocomplete="off">
+          </div>
+          <div class="produto-suggestion" id="vendaSugestoes" style="display:none;"></div>
+
+          <div class="d-flex justify-content-between align-items-center mt-3 mb-2">
+            <span class="section-title mt-0 mb-0">Itens no Carrinho</span>
+            <button class="btn btn-sm btn-outline-danger" onclick="limparCarrinho()" id="btnLimparCarrinho"><i class="fa-solid fa-trash me-1"></i> Limpar</button>
+          </div>
+          <div id="carrinhoItens" style="min-height: 180px;"><div class="empty-state">Nenhum item adicionado ao carrinho</div></div>
+        </div>
+      </div>
+
+      <!-- Fechamento da Venda -->
+      <div class="col-lg-5">
+        <div class="card-modern" id="cardFechamentoVenda">
+          <div class="section-title mt-0">Fechamento da Venda</div>
+          <div class="d-flex justify-content-between mb-2">
+            <span class="text-muted">Subtotal dos produtos</span>
+            <strong id="vSubtotal">R$ 0,00</strong>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Desconto</label>
+            <div class="input-group">
+              <select class="form-select" style="max-width:90px;" id="vDescontoTipo" onchange="atualizarCarrinho()">
+                <option value="valor">R$</option>
+                <option value="percentual">%</option>
+              </select>
+              <input type="number" class="form-control" id="vDescontoValor" min="0" step="0.01" value="0" oninput="atualizarCarrinho()">
+            </div>
+          </div>
+          <div class="d-flex justify-content-between mb-3 fs-4 border-top pt-2">
+            <span class="fw-bold">Total a Pagar</span>
+            <strong id="vTotal" style="color:var(--accent);">R$ 0,00</strong>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Vendedor responsável *</label>
+            <select class="form-select" id="vVendedor"></select>
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label">Forma de pagamento *</label>
+            <select class="form-select" id="vFormaPagamento" onchange="toggleFiadoCampos()">
+              <option value="Dinheiro">Dinheiro</option>
+              <option value="PIX">PIX</option>
+              <option value="Cartão">Cartão (Débito/Crédito)</option>
+              <option value="Fiado">Fiado (A Prazo / Crediário)</option>
+            </select>
+          </div>
+
+          <div id="vFiadoCampos" style="display:none;" class="p-3 mb-3 rounded border border-warning-subtle bg-warning-subtle text-dark">
+            <div class="fw-bold mb-2 text-warning-emphasis"><i class="fa-solid fa-hand-holding-dollar me-1"></i> Dados da Venda a Prazo (Fiado)</div>
+            <label class="form-label text-dark">Cliente cadastrado *</label>
+            <select class="form-select mb-2" id="vCliente"></select>
+            <label class="form-label text-dark">Data prevista para pagamento</label>
+            <input type="date" class="form-control mb-1" id="vDataPrevista">
+          </div>
+
+          <button class="btn btn-accent w-100 py-2 fs-6" id="btnFinalizarVenda" onclick="finalizarVenda()">
+            <i class="fa-solid fa-circle-check me-2"></i> Confirmar e Gravar Venda
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- HISTÓRICO DE VENDAS COM FILTRO POR PERÍODO AVANÇADO -->
+    <div class="section-title mt-4">Histórico de Vendas & Filtro por Período</div>
+    
+    <div class="card-modern mb-3" id="cardFiltroVendas">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3 col-6">
+          <label class="form-label">Data Inicial (De)</label>
+          <input type="date" class="form-control" id="vendasFiltroDe">
+        </div>
+        <div class="col-md-3 col-6">
+          <label class="form-label">Data Final (Até)</label>
+          <input type="date" class="form-control" id="vendasFiltroAte">
+        </div>
+        <div class="col-md-2 col-6">
+          <label class="form-label">Forma de Pagamento</label>
+          <select class="form-select" id="vendasFiltroForma">
+            <option value="todas">Todas</option>
+            <option value="Dinheiro">Dinheiro</option>
+            <option value="PIX">PIX</option>
+            <option value="Cartão">Cartão</option>
+            <option value="Fiado">Fiado</option>
+          </select>
+        </div>
+        <div class="col-md-2 col-6">
+          <label class="form-label">Vendedor</label>
+          <select class="form-select" id="vendasFiltroVendedor">
+            <option value="todos">Todos</option>
+          </select>
+        </div>
+        <div class="col-md-2 d-flex gap-2">
+          <button class="btn btn-accent flex-grow-1" onclick="carregarVendasFiltradas()" id="btnFiltrarVendas">
+            <i class="fa-solid fa-filter me-1"></i> Filtrar
+          </button>
+          <button class="btn btn-outline-secondary" onclick="limparFiltroVendas()" title="Limpar filtros" id="btnLimparFiltros">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick date presets -->
+      <div class="d-flex gap-2 mt-3 flex-wrap align-items-center">
+        <span class="text-muted me-1" style="font-size:12px;">Atalhos rápidos:</span>
+        <button class="filter-chip" onclick="setPresetFiltroVendas('hoje')">Hoje</button>
+        <button class="filter-chip" onclick="setPresetFiltroVendas('7dias')">Últimos 7 dias</button>
+        <button class="filter-chip" onclick="setPresetFiltroVendas('mesAtual')">Mês Atual</button>
+        <button class="filter-chip" onclick="setPresetFiltroVendas('mesAnterior')">Mês Anterior</button>
+        <button class="filter-chip" onclick="setPresetFiltroVendas('anoAtual')">Ano Atual</button>
+      </div>
+
+      <!-- Metrics summary for filtered period -->
+      <div class="row g-2 mt-3 pt-2 border-top" id="resumoPeriodoVendas">
+        <div class="col-6 col-md-3">
+          <div class="p-2 rounded bg-surface2">
+            <small class="text-muted d-block">Faturamento no período</small>
+            <strong class="fs-5" style="color:var(--accent);" id="resFaturamentoPeriodo">R$ 0,00</strong>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="p-2 rounded bg-surface2">
+            <small class="text-muted d-block">Lucro estimado</small>
+            <strong class="fs-5 text-success" id="resLucroPeriodo">R$ 0,00</strong>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="p-2 rounded bg-surface2">
+            <small class="text-muted d-block">Qtd. de Vendas</small>
+            <strong class="fs-5" id="resQtdVendasPeriodo">0</strong>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="p-2 rounded bg-surface2">
+            <small class="text-muted d-block">Ticket Médio</small>
+            <strong class="fs-5 text-info" id="resTicketMedioPeriodo">R$ 0,00</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="table-modern table-responsive">
+      <table class="table align-middle mb-0" id="tabelaHistoricoVendas">
+        <thead>
+          <tr>
+            <th>ID</th><th>Data/Hora</th><th>Itens / Produtos</th><th>Vendedor</th>
+            <th class="text-end">Total</th><th>Pagamento</th><th class="text-center">Ações</th>
+          </tr>
+        </thead>
+        <tbody id="tbodyVendas">
+          <tr><td colspan="7" class="empty-state">Nenhuma venda carregada</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: CLIENTES                                                          -->
+  <!-- ====================================================================== -->
+  <section id="tab-clientes" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h4 class="mb-0 fw-bold">Clientes Cadastrados</h4>
+      <button class="btn btn-accent" id="btnNovoCliente" onclick="openClienteModal()"><i class="fa-solid fa-plus me-1"></i> Novo cliente</button>
+    </div>
+    <input class="form-control mb-3" id="buscaCliente" placeholder="Pesquisar por nome ou telefone..." oninput="renderClientesFiltrados()">
+    <div class="table-modern table-responsive">
+      <table class="table align-middle mb-0" id="tabelaClientes">
+        <thead><tr><th>Nome</th><th>Telefone</th><th>WhatsApp</th><th class="text-end">Compras</th><th class="text-end">Total gasto</th><th class="text-center">Ações</th></tr></thead>
+        <tbody id="tbodyClientes"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: DEVEDORES (FIADO)                                                 -->
+  <!-- ====================================================================== -->
+  <section id="tab-devedores" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h4 class="mb-0 fw-bold">Controle de Devedores (Fiado)</h4>
+      <button class="btn btn-accent" id="btnNovoDevedor" onclick="openDevedorModal()"><i class="fa-solid fa-plus me-1"></i> Cadastrar devedor</button>
+    </div>
+    <div class="card-modern mb-3 d-inline-block">
+      <div class="label text-muted" style="font-size:12px;">Saldo total a receber em carteira</div>
+      <div class="fs-4 fw-bold text-danger" id="devTotalReceber">R$ 0,00</div>
+    </div>
+    <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
+      <input class="form-control" style="max-width:280px;" id="devBusca" placeholder="Pesquisar pelo nome..." oninput="renderDevedoresFiltrados()">
+      <button class="btn btn-outline-secondary" id="btnFiltroPendentes" onclick="toggleFiltroPendentes()">Apenas pendentes</button>
+    </div>
+    <div class="table-modern table-responsive">
+      <table class="table align-middle mb-0" id="tabelaDevedores">
+        <thead><tr><th>Nome</th><th>Telefone</th><th class="text-end">Saldo devedor</th><th>Previsão</th><th>Status</th><th class="text-center">Ações</th></tr></thead>
+        <tbody id="tbodyDevedores"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: COMISSÕES                                                         -->
+  <!-- ====================================================================== -->
+  <section id="tab-comissoes" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h4 class="mb-0 fw-bold">Comissões de Vendedores</h4>
+      <button class="btn btn-accent" id="btnNovoVendedor" onclick="openVendedorModal()"><i class="fa-solid fa-plus me-1"></i> Novo vendedor</button>
+    </div>
+
+    <div class="table-modern table-responsive mb-4">
+      <table class="table align-middle mb-0" id="tabelaVendedores">
+        <thead><tr><th>Nome</th><th class="text-end">Comissão padrão (%)</th><th>Status</th><th class="text-center">Ações</th></tr></thead>
+        <tbody id="tbodyVendedores"></tbody>
+      </table>
+    </div>
+
+    <div class="section-title">Apuração de Comissões por Período</div>
+    <div class="d-flex gap-2 mb-3 flex-wrap align-items-end">
+      <div><label class="form-label mb-1">De</label><input type="date" class="form-control" id="comFiltroDe" onchange="carregarComissoes()"></div>
+      <div><label class="form-label mb-1">Até</label><input type="date" class="form-control" id="comFiltroAte" onchange="carregarComissoes()"></div>
+      <button class="btn btn-outline-secondary" onclick="setPeriodoComissoesMesAtual()">Mês atual</button>
+    </div>
+    <div class="table-modern table-responsive mb-3">
+      <table class="table align-middle mb-0" id="tabelaApuracaoComissoes">
+        <thead><tr><th>Vendedor</th><th class="text-end">Qtd. vendas</th><th class="text-end">Total vendido</th><th class="text-end">Comissão (%)</th><th class="text-end">Comissão a pagar</th></tr></thead>
+        <tbody id="tbodyComissoes"></tbody>
+      </table>
+    </div>
+    <div class="card-modern d-inline-block">
+      <div class="label text-muted" style="font-size:12px;">Total geral de comissões no período</div>
+      <div class="fs-4 fw-bold" id="comTotalGeral" style="color:var(--accent);">R$ 0,00</div>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: RELATÓRIOS (COM RELATÓRIO DE DESEMPENHO MENSAL DETALHADO)         -->
+  <!-- ====================================================================== -->
+  <section id="tab-relatorios" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h4 class="mb-0 fw-bold">Relatórios & Inteligência de Negócio</h4>
+      <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary" id="btnImprimirRelatorio" onclick="imprimirRelatorioAtual()"><i class="fa-solid fa-print me-1"></i> Imprimir / Exportar PDF</button>
+      </div>
+    </div>
+
+    <!-- Navegação de sub-relatórios -->
+    <ul class="nav nav-pills mb-3" id="relTabs">
+      <li class="nav-item"><a class="nav-link active" data-rel="mensal" href="#" id="tabRelMensal"><i class="fa-solid fa-calendar-check me-1"></i> Desempenho Mensal Detalhado</a></li>
+      <li class="nav-item"><a class="nav-link" data-rel="produtos" href="#" id="tabRelProdutos">Produtos</a></li>
+      <li class="nav-item"><a class="nav-link" data-rel="estoque" href="#" id="tabRelEstoque">Estoque</a></li>
+      <li class="nav-item"><a class="nav-link" data-rel="vendas" href="#" id="tabRelVendas">Vendas</a></li>
+      <li class="nav-item"><a class="nav-link" data-rel="devedores" href="#" id="tabRelDevedores">Devedores</a></li>
+    </ul>
+
+    <!-- ÁREA 1: RELATÓRIO DE DESEMPENHO MENSAL DETALHADO -->
+    <div id="rel-conteudo-mensal">
+      <div class="card-modern mb-3" id="filtroRelatorioMensal">
+        <div class="row g-2 align-items-end">
+          <div class="col-md-3 col-6">
+            <label class="form-label">Ano de Referência</label>
+            <select class="form-select" id="relMensalAno" onchange="carregarRelatorioMensalDetalhado()">
+              <option value="2024">2024</option>
+              <option value="2025">2025</option>
+              <option value="2026" selected>2026</option>
+              <option value="2027">2027</option>
+            </select>
+          </div>
+          <div class="col-md-3 col-6">
+            <label class="form-label">Mês de Referência</label>
+            <select class="form-select" id="relMensalMes" onchange="carregarRelatorioMensalDetalhado()">
+              <option value="1">01 - Janeiro</option>
+              <option value="2">02 - Fevereiro</option>
+              <option value="3">03 - Março</option>
+              <option value="4">04 - Abril</option>
+              <option value="5">05 - Maio</option>
+              <option value="6">06 - Junho</option>
+              <option value="7">07 - Julho</option>
+              <option value="8" selected>08 - Agosto</option>
+              <option value="9">09 - Setembro</option>
+              <option value="10">10 - Outubro</option>
+              <option value="11">11 - Novembro</option>
+              <option value="12">12 - Dezembro</option>
+            </select>
+          </div>
+          <div class="col-md-6 d-flex gap-2">
+            <button class="btn btn-accent" onclick="setRelatorioMesAtual()">
+              <i class="fa-solid fa-calendar-day me-1"></i> Ir para Mês Atual
+            </button>
+            <button class="btn btn-outline-secondary" onclick="carregarRelatorioMensalDetalhado()">
+              <i class="fa-solid fa-arrows-rotate me-1"></i> Recalcular
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- KPIs Mensais -->
+      <div class="row g-3 mb-3" id="cardsKpisMensais">
+        <div class="col-md-3 col-6">
+          <div class="stat-card">
+            <div class="icon" style="background:rgba(47,191,143,.15);color:var(--accent);"><i class="fa-solid fa-chart-line"></i></div>
+            <div>
+              <div class="label">Faturamento Bruto</div>
+              <div class="value" id="rmFaturamento">R$ 0,00</div>
+              <small class="text-muted" style="font-size:11px;" id="rmDescontosBadge">Descontos: R$ 0,00</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3 col-6">
+          <div class="stat-card">
+            <div class="icon" style="background:rgba(224,90,78,.15);color:#e05a4e;"><i class="fa-solid fa-boxes-packing"></i></div>
+            <div>
+              <div class="label">Custo das Mercadorias (CMV)</div>
+              <div class="value" id="rmCmv">R$ 0,00</div>
+              <small class="text-muted" style="font-size:11px;">Custo direto das vendas</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3 col-6">
+          <div class="stat-card">
+            <div class="icon" style="background:rgba(47,191,143,.15);color:var(--accent);"><i class="fa-solid fa-sack-dollar"></i></div>
+            <div>
+              <div class="label">Lucro Bruto Real</div>
+              <div class="value text-success" id="rmLucro">R$ 0,00</div>
+              <small class="fw-bold" style="font-size:11px;color:var(--accent);" id="rmMargem">Margem: 0%</small>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3 col-6">
+          <div class="stat-card">
+            <div class="icon" style="background:rgba(90,140,224,.15);color:#5a8ce0;"><i class="fa-solid fa-receipt"></i></div>
+            <div>
+              <div class="label">Total de Vendas / Ticket</div>
+              <div class="value" id="rmQtdVendas">0</div>
+              <small class="text-muted" style="font-size:11px;" id="rmTicketMedio">Ticket: R$ 0,00</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Gráficos Mensais -->
+      <div class="row g-3 mb-3">
+        <div class="col-lg-8">
+          <div class="card-modern">
+            <div class="section-title mt-0 mb-2">Curva Diária de Faturamento e Lucro no Mês</div>
+            <canvas id="chartRelatorioMensalEvolucao" height="160"></canvas>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card-modern">
+            <div class="section-title mt-0 mb-2">Vendas por Forma de Pagamento</div>
+            <canvas id="chartRelatorioMensalFormas" height="160"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabelas Analíticas do Mês -->
+      <div class="row g-3 mb-3">
+        <!-- Ranking de Vendedores -->
+        <div class="col-lg-6">
+          <div class="card-modern">
+            <div class="section-title mt-0 mb-2">Desempenho por Vendedor no Mês</div>
+            <div class="table-modern table-responsive">
+              <table class="table align-middle mb-0" id="tabelaRmRankingVendedores">
+                <thead><tr><th>Vendedor</th><th class="text-end">Vendas</th><th class="text-end">Total</th><th class="text-end">Part. %</th><th class="text-end">Comissão</th></tr></thead>
+                <tbody id="tbodyRmRankingVendedores"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Vendas por Categoria -->
+        <div class="col-lg-6">
+          <div class="card-modern">
+            <div class="section-title mt-0 mb-2">Faturamento por Categoria no Mês</div>
+            <div class="table-modern table-responsive">
+              <table class="table align-middle mb-0" id="tabelaRmCategorias">
+                <thead><tr><th>Categoria</th><th class="text-end">Qtd Vendida</th><th class="text-end">Faturamento</th><th class="text-end">Lucro</th></tr></thead>
+                <tbody id="tbodyRmCategorias"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Top 10 Produtos Mais Vendidos -->
+      <div class="card-modern mb-3">
+        <div class="section-title mt-0 mb-2">Top 10 Produtos Mais Vendidos no Mês</div>
+        <div class="table-modern table-responsive">
+          <table class="table align-middle mb-0" id="tabelaRmTopProdutos">
+            <thead><tr><th>#</th><th>Produto</th><th>Marca</th><th class="text-end">Qtd Vendida</th><th class="text-end">Faturamento</th><th class="text-end">Lucro</th><th class="text-end">Margem</th></tr></thead>
+            <tbody id="tbodyRmTopProdutos"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ÁREA 2: DEMAIS RELATÓRIOS SIMPLES -->
+    <div id="relatorioConteudoGenerico" style="display:none;" class="table-modern table-responsive"></div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: GESTÃO DE USUÁRIOS (ADMIN ONLY)                                   -->
+  <!-- ====================================================================== -->
+  <section id="tab-usuarios" class="screen">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <div>
+        <h4 class="mb-0 fw-bold">Gestão de Usuários & Acessos</h4>
+        <small class="text-muted">Controle os usuários, níveis de permissão (Admin, Gerente, Caixa, Vendedor) e credenciais de login.</small>
+      </div>
+      <button class="btn btn-accent" onclick="openNovoUsuarioModal()"><i class="fa-solid fa-user-plus me-1"></i> Novo usuário</button>
+    </div>
+
+    <div class="table-modern table-responsive">
+      <table class="table align-middle mb-0" id="tabelaUsuarios">
+        <thead>
+          <tr>
+            <th>Nome</th><th>Login / Username</th><th>E-mail</th><th>Perfil / Nível</th><th>Status</th><th>Criado em</th><th class="text-center">Ações</th>
+          </tr>
+        </thead>
+        <tbody id="tbodyUsuarios">
+          <tr><td colspan="7" class="empty-state">Carregando usuários...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ====================================================================== -->
+  <!-- TAB: CONFIGURAÇÕES                                                     -->
+  <!-- ====================================================================== -->
+  <section id="tab-config" class="screen">
+    <h4 class="mb-3 fw-bold">Configurações do Sistema</h4>
+
+    <div class="row g-3">
+      <div class="col-md-6">
+        <!-- Identidade da Loja -->
+        <div class="card-modern mb-3" id="cardConfigLoja">
+          <div class="section-title mt-0">Identidade da Loja</div>
+          <div class="mb-3">
+            <label class="form-label">Nome da Loja</label>
+            <input class="form-control" id="cfgNomeLoja">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Logotipo (PNG / JPEG)</label><br>
+            <img id="cfgLogoPreview" style="width:64px;height:64px;border-radius:12px;object-fit:cover;display:none;margin-bottom:8px;" alt="Logo">
+            <input type="file" class="form-control" accept="image/*" onchange="handleLogo(event)">
+          </div>
+          <button class="btn btn-accent" onclick="salvarConfig()"><i class="fa-solid fa-floppy-disk me-1"></i> Salvar Identidade</button>
+        </div>
+
+        <!-- Política de Segurança: Ocultar Vendas para Vendedor -->
+        <div class="card-modern mb-3" id="cardConfigPoliticaSeguranca">
+          <div class="section-title mt-0">Políticas de Segurança e Acesso</div>
+          <p class="text-muted" style="font-size:13px;">Configure restrições de tela e privilégios para perfis operacionais.</p>
+
+          <div class="form-check form-switch mb-3 p-2 rounded bg-surface2">
+            <input class="form-check-input ms-0 me-2" type="checkbox" id="cfgOcultarVendasVendedor" checked onchange="salvarPoliticaVendedor()">
+            <label class="form-check-label fw-bold" for="cfgOcultarVendasVendedor">
+              Ocultar a tela de venda para vendedor
+            </label>
+            <small class="d-block text-muted mt-1" style="font-size: 12px;">
+              Quando ativado, os usuários com o perfil <strong>Vendedor</strong> não visualizam a aba de vendas nem o terminal de fechamento de caixa, mantendo o PDV exclusivo para Caixas e Administradores.
+            </small>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <!-- Backup & Restauração Segura do Banco -->
+        <div class="card-modern mb-3" id="cardBackupDB">
+          <div class="section-title mt-0">Backup & Recuperação do Banco de Dados</div>
+          <p class="text-muted" style="font-size:13px;">O sistema armazena todos os registros no banco de dados SQLite persistente. Você pode exportar ou restaurar uma cópia completa em JSON com validação atômica.</p>
+          
+          <button class="btn btn-accent mb-2 w-100" onclick="exportarBackupJSON()">
+            <i class="fa-solid fa-download me-1"></i> Baixar Cópia de Segurança (.json)
+          </button>
+          
+          <label class="btn btn-outline-secondary w-100 mb-0">
+            <i class="fa-solid fa-upload me-1"></i> Restaurar Banco a partir de Backup (.json)
+            <input type="file" accept="application/json" style="display:none;" onchange="importarBackupJSON(event)">
+          </label>
+        </div>
+
+        <!-- Informações do Sistema -->
+        <div class="card-modern" id="cardInfoSistema">
+          <div class="section-title mt-0">Informações Técnicas</div>
+          <ul class="list-unstyled mb-0" style="font-size: 13px;">
+            <li class="mb-1"><strong>Banco de dados:</strong> SQLite (com WAL mode e chaves estrangeiras)</li>
+            <li class="mb-1"><strong>Autenticação:</strong> Criptografia PBKDF2 com Salt e Sessões Seguras</li>
+            <li class="mb-1"><strong>Formato de Interface:</strong> HTML5 nativo com Bootstrap 5.3 e Chart.js</li>
+            <li class="mb-1"><strong>Versão do Sistema:</strong> 2.0.0 (Revisão Segura)</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- PRINT CONTAINER -->
+<div id="printArea"></div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: LOGIN / AUTENTICAÇÃO                                            -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalLogin" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content p-2">
+      <div class="modal-header border-0 pb-0">
+        <div>
+          <h5 class="modal-title fw-bold">Acesso ao Sistema</h5>
+          <small class="text-muted">Entre com suas credenciais para acessar o AppVenda</small>
+        </div>
+      </div>
+      <div class="modal-body">
+        <form onsubmit="executarLogin(event)">
+          <div class="mb-3">
+            <label class="form-label">Usuário ou E-mail</label>
+            <input type="text" class="form-control" id="loginIdentifier" placeholder="admin ou admin@loja.com" required autocomplete="username">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Senha</label>
+            <input type="password" class="form-control" id="loginPassword" placeholder="••••••••" required autocomplete="current-password">
+          </div>
+          <button type="submit" class="btn btn-accent w-100 py-2 fs-6 mb-3" id="btnLoginSubmit">
+            <i class="fa-solid fa-right-to-bracket me-1"></i> Entrar no Sistema
+          </button>
+        </form>
+
+        <div class="pt-3 border-top">
+          <small class="text-muted d-block mb-2 text-center">Atalhos de Acesso Rápido para Demonstração:</small>
+          <div class="d-flex flex-column gap-1">
+            <button class="btn btn-sm btn-outline-secondary text-start" onclick="preencherLogin('admin', 'admin123')">
+              <i class="fa-solid fa-crown me-1 text-warning"></i> <strong>Administrador:</strong> admin / admin123 (Acesso total)
+            </button>
+            <button class="btn btn-sm btn-outline-secondary text-start" onclick="preencherLogin('vendedor', 'vendedor123')">
+              <i class="fa-solid fa-user-tag me-1 text-info"></i> <strong>Vendedor:</strong> vendedor / vendedor123 (Tela de Venda Oculta)
+            </button>
+            <button class="btn btn-sm btn-outline-secondary text-start" onclick="preencherLogin('caixa', 'caixa123')">
+              <i class="fa-solid fa-cash-register me-1 text-success"></i> <strong>Caixa:</strong> caixa / caixa123 (Operador do PDV)
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: RECIBO / DETALHES DA VENDA                                      -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalReciboVenda" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-bold" id="reciboTitulo">Recibo da Venda #</h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="reciboConteudo">
+        <!-- Rendered via JS -->
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-danger me-auto" id="btnCancelarVendaModal" style="display:none;" onclick="cancelarVendaAtual()">
+          <i class="fa-solid fa-ban me-1"></i> Cancelar Venda
+        </button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+        <button class="btn btn-accent" onclick="imprimirRecibo()"><i class="fa-solid fa-print me-1"></i> Imprimir</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: PRODUTO                                                         -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalProduto" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable modal-lg">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title fw-bold" id="produtoModalTitle">Novo produto</h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="prodId"><input type="hidden" id="prodFoto">
+        <div class="d-flex align-items-center gap-3 mb-3">
+          <img id="fotoPreviewImg" style="width:64px;height:64px;border-radius:12px;object-fit:cover;display:none;" alt="Foto">
+          <div id="fotoPreviewPlaceholder" style="width:64px;height:64px;border-radius:12px;background:var(--surface2);border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:22px;color:var(--muted);">📦</div>
+          <div class="d-flex flex-column gap-1 flex-grow-1">
+            <label class="btn btn-sm btn-outline-secondary mb-0">📷 Tirar foto<input type="file" accept="image/*" capture="environment" style="display:none;" onchange="handleFoto(event)"></label>
+            <label class="btn btn-sm btn-outline-secondary mb-0">🖼️ Galeria<input type="file" accept="image/*" style="display:none;" onchange="handleFoto(event)"></label>
+          </div>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-6"><label class="form-label">Nome do Produto *</label><input class="form-control" id="prodNome" required></div>
+          <div class="col-md-6"><label class="form-label">Marca / Fabricante</label><input class="form-control" id="prodMarca"></div>
+          <div class="col-md-4"><label class="form-label">Categoria</label><input class="form-control" id="prodCategoria" placeholder="Ex: Proteínas, Creatinas..."></div>
+          <div class="col-md-4"><label class="form-label">Sabor (opcional)</label><input class="form-control" id="prodSabor"></div>
+          <div class="col-md-4"><label class="form-label">Peso / Volume</label><input class="form-control" id="prodPeso" placeholder="Ex: 900g, 300g"></div>
+          <div class="col-md-6"><label class="form-label">Código interno</label><input class="form-control" id="prodCodigoInterno"></div>
+          <div class="col-md-6"><label class="form-label">Código de barras (EAN)</label><input class="form-control" id="prodCodigoBarras"></div>
+          <div class="col-md-4"><label class="form-label">Valor de custo (R$) *</label><input type="number" step="0.01" min="0" class="form-control" id="prodCusto" oninput="calcMargem()" required></div>
+          <div class="col-md-4"><label class="form-label">Valor de venda (R$) *</label><input type="number" step="0.01" min="0" class="form-control" id="prodVenda" oninput="calcMargem()" required></div>
+          <div class="col-md-4"><label class="form-label">Margem de lucro</label><input class="form-control" id="prodMargem" disabled></div>
+          <div class="col-md-6"><label class="form-label">Estoque inicial</label><input type="number" step="1" min="0" class="form-control" id="prodEstoqueInicial"></div>
+          <div class="col-md-6"><label class="form-label">Estoque mínimo de alerta</label><input type="number" step="1" min="0" class="form-control" id="prodMinimo" value="5"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-danger me-auto" id="btnExcluirProduto" style="display:none;" onclick="excluirProduto()">Excluir</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-accent" onclick="salvarProduto()">Salvar no Banco</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: CLIENTE                                                         -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalCliente" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title fw-bold" id="clienteModalTitle">Cliente</h5><button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="cliId">
+        <div class="mb-3"><label class="form-label">Nome Completo *</label><input class="form-control" id="cliNome" required></div>
+        <div class="mb-3"><label class="form-label">Telefone de Contato</label><input class="form-control" id="cliTelefone" placeholder="(XX) XXXXX-XXXX"></div>
+        <div class="mb-3"><label class="form-label">WhatsApp</label><input class="form-control" id="cliWhatsapp" placeholder="(XX) XXXXX-XXXX"></div>
+        <div id="cliHistoricoWrap" style="display:none;">
+          <div class="section-title">Histórico de Compras</div>
+          <div id="cliHistorico" style="max-height: 200px; overflow-y: auto;"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-danger me-auto" id="btnExcluirCliente" style="display:none;" onclick="excluirCliente()">Excluir</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-accent" onclick="salvarCliente()">Salvar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: DEVEDOR (CADASTRO)                                              -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalDevedor" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title fw-bold">Cadastrar Devedor (Fiado)</h5><button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-3"><label class="form-label">Nome do Devedor *</label><input class="form-control" id="devNome" required></div>
+        <div class="mb-3"><label class="form-label">Telefone</label><input class="form-control" id="devTelefone"></div>
+        <div class="mb-3"><label class="form-label">Valor da Dívida (R$) *</label><input type="number" step="0.01" min="0" class="form-control" id="devValor" required></div>
+        <div class="row">
+          <div class="col-6 mb-3"><label class="form-label">Data da Venda</label><input type="date" class="form-control" id="devDataVenda"></div>
+          <div class="col-6 mb-3"><label class="form-label">Previsão de Pagamento</label><input type="date" class="form-control" id="devDataPrevista"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-accent" onclick="salvarDevedor()">Gravar Dívida</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: DETALHES DEVEDOR                                                -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalDevedorDetalhe" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title fw-bold" id="devDetalheNome">Devedor</h5><button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="devDetalheId">
+        <div class="d-flex justify-content-between mb-3 p-2 rounded bg-surface2">
+          <span class="text-muted">Saldo em Aberto:</span>
+          <strong id="devDetalheSaldo" style="color:var(--accent);font-size:18px;">R$ 0,00</strong>
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6"><input type="number" min="0" step="0.01" class="form-control" id="devNovoValor" placeholder="Valor (R$)"></div>
+          <div class="col-6 d-flex gap-2">
+            <button class="btn btn-outline-warning flex-fill" onclick="devAdicionarDivida()">+ Dívida</button>
+            <button class="btn btn-outline-success flex-fill" onclick="devRegistrarPagamento()">Pagamento</button>
+          </div>
+        </div>
+        <button class="btn btn-accent w-100 mb-3" onclick="devQuitarTudo()"><i class="fa-solid fa-check-double me-1"></i> Quitar Dívida Total</button>
+        <div class="section-title mt-0">Histórico de Pagamentos e Débitos</div>
+        <div id="devHistoricoLista" style="max-height: 220px; overflow-y: auto;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: VENDEDOR                                                        -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalVendedor" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title fw-bold" id="vendedorModalTitle">Novo vendedor</h5><button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <input type="hidden" id="venId">
+        <div class="mb-3"><label class="form-label">Nome do Vendedor *</label><input class="form-control" id="venNome" required></div>
+        <div class="mb-3"><label class="form-label">Comissão Padrão (%)</label><input type="number" step="0.1" min="0" class="form-control" id="venComissao" value="0"></div>
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" id="venAtivo" checked>
+          <label class="form-check-label" for="venAtivo">Vendedor ativo (disponível no fechamento de vendas)</label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-danger me-auto" id="btnExcluirVendedor" style="display:none;" onclick="excluirVendedor()">Excluir</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-accent" onclick="salvarVendedor()">Salvar Vendedor</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: USUÁRIO DO SISTEMA (ADMIN ONLY)                                 -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalUsuario" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-bold" id="usuarioModalTitle">Novo Usuário</h5>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="usrId">
+        <div class="mb-3">
+          <label class="form-label">Nome Completo *</label>
+          <input class="form-control" id="usrNome" required>
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <label class="form-label">Login / Usuário *</label>
+            <input class="form-control" id="usrUsername" required>
+          </div>
+          <div class="col-6">
+            <label class="form-label">Perfil de Acesso *</label>
+            <select class="form-select" id="usrRole">
+              <option value="admin">Administrador (Total)</option>
+              <option value="gerente">Gerente (Gestão & Relatórios)</option>
+              <option value="caixa">Caixa (Operador PDV)</option>
+              <option value="vendedor" selected>Vendedor (Restrito)</option>
+            </select>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">E-mail *</label>
+          <input type="email" class="form-control" id="usrEmail" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label" id="usrSenhaLabel">Senha de Acesso *</label>
+          <input type="password" class="form-control" id="usrSenha" placeholder="Mínimo 4 caracteres">
+          <small class="text-muted" id="usrSenhaDica" style="display:none;">Deixe em branco para manter a senha atual.</small>
+        </div>
+        <div class="form-check form-switch" id="usrAtivoWrap">
+          <input class="form-check-input" type="checkbox" id="usrAtivo" checked>
+          <label class="form-check-label" for="usrAtivo">Usuário ativo</label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-danger me-auto" id="btnExcluirUsuario" style="display:none;" onclick="excluirUsuario()">Excluir</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-accent" onclick="salvarUsuario()">Salvar Usuário</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- EXTERNAL SCRIPTS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.3/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sweetalert2/11.10.5/sweetalert2.all.min.js"></script>
+
+<!-- APP CLIENT ENGINE (Vite module) -->
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
