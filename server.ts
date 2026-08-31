@@ -1,10 +1,23 @@
 import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { db, initDatabase, hashPassword, verifyPassword, generateToken } from "./server/db.ts";
+import {
+  db,
+  initDatabase,
+  hashPassword,
+  verifyPassword,
+  generateToken,
+  FirestoreSyncService,
+} from "./server/db.ts";
+import { getNextSequence } from "./server/firestore-db.ts";
 
-// Initialize database tables and sample seeds
+// Initialize tables in SQLite local cache
 initDatabase();
+
+// Hydrate from Cloud Firestore
+FirestoreSyncService.syncFromCloud().catch((err) => {
+  console.error("Erro ao sincronizar com Firestore:", err);
+});
 
 const app = express();
 const PORT = 3000;
@@ -50,6 +63,7 @@ function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
 
     if (new Date(session.expires_at) < new Date()) {
       db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+      FirestoreSyncService.deleteSession(token);
       res.status(401).json({ error: "Sessão expirada. Faça login novamente." });
       return;
     }
@@ -97,7 +111,7 @@ function getConfigValue(key: string, defaultValue: string = ""): string {
 
 // Health check
 app.get("/api/health", (req: Request, res: Response) => {
-  res.json({ status: "ok", app: "AppVenda", database: "SQLite", version: "2.0.0" });
+  res.json({ status: "ok", app: "AppVenda", database: "Firebase Firestore + Cache", version: "2.0.0" });
 });
 
 /* ========================================================================== */
@@ -138,11 +152,19 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
 
     const token = generateToken();
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days
+    const now = new Date().toISOString();
 
     db.prepare(`
       INSERT INTO sessions (token, user_id, expires_at, created_at)
       VALUES (?, ?, ?, ?)
-    `).run(token, user.id, expiresAt, new Date().toISOString());
+    `).run(token, user.id, expiresAt, now);
+
+    FirestoreSyncService.saveSession({
+      token,
+      user_id: user.id,
+      expires_at: expiresAt,
+      created_at: now,
+    });
 
     const ocultarVendasVendedor = getConfigValue("ocultarVendasVendedor", "1") === "1";
 
@@ -181,6 +203,7 @@ app.post("/api/auth/logout", authMiddleware, (req: AuthRequest, res: Response) =
   const token = req.headers.authorization?.substring(7);
   if (token) {
     db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
+    FirestoreSyncService.deleteSession(token);
   }
   res.json({ success: true, message: "Sessão encerrada com sucesso." });
 });
@@ -200,7 +223,7 @@ app.get("/api/auth/users", authMiddleware, requireRole(["admin"]), (req: AuthReq
 });
 
 // Create User (Admin only)
-app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), (req: AuthRequest, res: Response) => {
+app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), async (req: AuthRequest, res: Response) => {
   try {
     const { username, nome, email, password, role } = req.body;
     if (!username || !nome || !email || !password || !role) {
@@ -219,13 +242,26 @@ app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), (req: AuthRe
 
     const { hash, salt } = hashPassword(password);
     const now = new Date().toISOString();
+    const newId = await getNextSequence("users");
 
-    const insert = db.prepare(`
-      INSERT INTO users (username, nome, email, password_hash, salt, role, ativo, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(username.trim(), nome.trim(), email.trim(), hash, salt, role, now);
+    db.prepare(`
+      INSERT INTO users (id, username, nome, email, password_hash, salt, role, ativo, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+    `).run(newId, username.trim(), nome.trim(), email.trim(), hash, salt, role, now);
 
-    res.json({ success: true, id: insert.lastInsertRowid });
+    FirestoreSyncService.saveUser({
+      id: newId,
+      username: username.trim(),
+      nome: nome.trim(),
+      email: email.trim(),
+      password_hash: hash,
+      salt: salt,
+      role: role,
+      ativo: 1,
+      created_at: now,
+    });
+
+    res.json({ success: true, id: newId });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao criar usuário: " + err.message });
   }
@@ -237,26 +273,38 @@ app.put("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: Aut
     const id = parseInt(req.params.id);
     const { nome, email, role, ativo, password } = req.body;
 
-    const user = db.prepare("SELECT id FROM users WHERE id = ?").get(id);
+    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
     if (!user) {
       res.status(404).json({ error: "Usuário não encontrado." });
       return;
     }
 
+    let passwordHash = user.password_hash;
+    let userSalt = user.salt;
+
     if (password && password.trim().length >= 4) {
-      const { hash, salt } = hashPassword(password.trim());
-      db.prepare(`
-        UPDATE users
-        SET nome = ?, email = ?, role = ?, ativo = ?, password_hash = ?, salt = ?
-        WHERE id = ?
-      `).run(nome, email, role, ativo ? 1 : 0, hash, salt, id);
-    } else {
-      db.prepare(`
-        UPDATE users
-        SET nome = ?, email = ?, role = ?, ativo = ?
-        WHERE id = ?
-      `).run(nome, email, role, ativo ? 1 : 0, id);
+      const generated = hashPassword(password.trim());
+      passwordHash = generated.hash;
+      userSalt = generated.salt;
     }
+
+    db.prepare(`
+      UPDATE users
+      SET nome = ?, email = ?, role = ?, ativo = ?, password_hash = ?, salt = ?
+      WHERE id = ?
+    `).run(nome, email, role, ativo ? 1 : 0, passwordHash, userSalt, id);
+
+    FirestoreSyncService.saveUser({
+      id,
+      username: user.username,
+      nome: nome.trim(),
+      email: email.trim(),
+      role,
+      ativo: ativo ? 1 : 0,
+      password_hash: passwordHash,
+      salt: userSalt,
+      created_at: user.created_at || new Date().toISOString(),
+    });
 
     res.json({ success: true, message: "Usuário atualizado com sucesso." });
   } catch (err: any) {
@@ -273,6 +321,7 @@ app.delete("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: 
       return;
     }
     db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    FirestoreSyncService.deleteUser(id);
     res.json({ success: true, message: "Usuário excluído." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao excluir usuário." });
@@ -286,11 +335,11 @@ app.delete("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: 
 app.get("/api/config", (req: Request, res: Response) => {
   try {
     const rows = db.prepare("SELECT key, value FROM config").all() as any[];
-    const config: Record<string, string> = {};
+    const configObj: Record<string, string> = {};
     rows.forEach((r) => {
-      config[r.key] = r.value;
+      configObj[r.key] = r.value;
     });
-    res.json(config);
+    res.json(configObj);
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao buscar configurações." });
   }
@@ -301,12 +350,25 @@ app.post("/api/config", authMiddleware, requireRole(["admin"]), (req: AuthReques
     const { nomeLoja, logo, ocultarVendasVendedor, pinAdmin } = req.body;
     const upsert = db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
 
-    if (nomeLoja !== undefined) upsert.run("nomeLoja", String(nomeLoja));
-    if (logo !== undefined) upsert.run("logo", String(logo));
-    if (ocultarVendasVendedor !== undefined) upsert.run("ocultarVendasVendedor", ocultarVendasVendedor ? "1" : "0");
-    if (pinAdmin !== undefined) upsert.run("pinAdmin", String(pinAdmin));
+    if (nomeLoja !== undefined) {
+      upsert.run("nomeLoja", String(nomeLoja));
+      FirestoreSyncService.saveConfig("nomeLoja", String(nomeLoja));
+    }
+    if (logo !== undefined) {
+      upsert.run("logo", String(logo));
+      FirestoreSyncService.saveConfig("logo", String(logo));
+    }
+    if (ocultarVendasVendedor !== undefined) {
+      const val = ocultarVendasVendedor ? "1" : "0";
+      upsert.run("ocultarVendasVendedor", val);
+      FirestoreSyncService.saveConfig("ocultarVendasVendedor", val);
+    }
+    if (pinAdmin !== undefined) {
+      upsert.run("pinAdmin", String(pinAdmin));
+      FirestoreSyncService.saveConfig("pinAdmin", String(pinAdmin));
+    }
 
-    res.json({ success: true, message: "Configurações salvas." });
+    res.json({ success: true, message: "Configurações salvas permanentemente na nuvem." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao salvar configurações." });
   }
@@ -325,7 +387,7 @@ app.get("/api/produtos", authMiddleware, (req: AuthRequest, res: Response) => {
   }
 });
 
-app.post("/api/produtos", authMiddleware, requireRole(["admin", "gerente"]), (req: AuthRequest, res: Response) => {
+app.post("/api/produtos", authMiddleware, requireRole(["admin", "gerente"]), async (req: AuthRequest, res: Response) => {
   try {
     const { nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto } = req.body;
     if (!nome || custo === undefined || venda === undefined) {
@@ -334,27 +396,50 @@ app.post("/api/produtos", authMiddleware, requireRole(["admin", "gerente"]), (re
     }
 
     const now = new Date().toISOString();
-    const insert = db.prepare(`
-      INSERT INTO produtos (nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    const newId = await getNextSequence("produtos");
+
+    const produtoData = {
+      id: newId,
+      nome: nome.trim(),
+      marca: marca || "",
+      categoria: categoria || "",
+      sabor: sabor || "",
+      peso: peso || "",
+      codigo_interno: codigo_interno || "",
+      codigo_barras: codigo_barras || "",
+      custo: parseFloat(custo) || 0,
+      venda: parseFloat(venda) || 0,
+      estoque: parseFloat(estoque) || 0,
+      minimo: parseFloat(minimo) || 5,
+      foto: foto || "",
+      created_at: now,
+      updated_at: now,
+    };
+
+    db.prepare(`
+      INSERT INTO produtos (id, nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      nome.trim(),
-      marca || "",
-      categoria || "",
-      sabor || "",
-      peso || "",
-      codigo_interno || "",
-      codigo_barras || "",
-      parseFloat(custo) || 0,
-      parseFloat(venda) || 0,
-      parseFloat(estoque) || 0,
-      parseFloat(minimo) || 5,
-      foto || "",
+      newId,
+      produtoData.nome,
+      produtoData.marca,
+      produtoData.categoria,
+      produtoData.sabor,
+      produtoData.peso,
+      produtoData.codigo_interno,
+      produtoData.codigo_barras,
+      produtoData.custo,
+      produtoData.venda,
+      produtoData.estoque,
+      produtoData.minimo,
+      produtoData.foto,
       now,
       now
     );
 
-    res.json({ success: true, id: insert.lastInsertRowid });
+    FirestoreSyncService.saveProduto(produtoData);
+
+    res.json({ success: true, id: newId });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao salvar produto: " + err.message });
   }
@@ -365,28 +450,52 @@ app.put("/api/produtos/:id", authMiddleware, requireRole(["admin", "gerente"]), 
     const id = parseInt(req.params.id);
     const { nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, minimo, foto } = req.body;
 
+    const existing = db.prepare("SELECT * FROM produtos WHERE id = ?").get(id) as any;
+    if (!existing) {
+      res.status(404).json({ error: "Produto não encontrado." });
+      return;
+    }
+
     const now = new Date().toISOString();
+    const updated = {
+      ...existing,
+      nome: nome.trim(),
+      marca: marca || "",
+      categoria: categoria || "",
+      sabor: sabor || "",
+      peso: peso || "",
+      codigo_interno: codigo_interno || "",
+      codigo_barras: codigo_barras || "",
+      custo: parseFloat(custo) || 0,
+      venda: parseFloat(venda) || 0,
+      minimo: parseFloat(minimo) || 5,
+      foto: foto || "",
+      updated_at: now,
+    };
+
     db.prepare(`
       UPDATE produtos
       SET nome = ?, marca = ?, categoria = ?, sabor = ?, peso = ?, codigo_interno = ?, codigo_barras = ?, custo = ?, venda = ?, minimo = ?, foto = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      nome.trim(),
-      marca || "",
-      categoria || "",
-      sabor || "",
-      peso || "",
-      codigo_interno || "",
-      codigo_barras || "",
-      parseFloat(custo) || 0,
-      parseFloat(venda) || 0,
-      parseFloat(minimo) || 5,
-      foto || "",
+      updated.nome,
+      updated.marca,
+      updated.categoria,
+      updated.sabor,
+      updated.peso,
+      updated.codigo_interno,
+      updated.codigo_barras,
+      updated.custo,
+      updated.venda,
+      updated.minimo,
+      updated.foto,
       now,
       id
     );
 
-    res.json({ success: true, message: "Produto atualizado." });
+    FirestoreSyncService.saveProduto(updated);
+
+    res.json({ success: true, message: "Produto atualizado na nuvem." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao atualizar produto." });
   }
@@ -396,6 +505,7 @@ app.delete("/api/produtos/:id", authMiddleware, requireRole(["admin", "gerente"]
   try {
     const id = parseInt(req.params.id);
     db.prepare("DELETE FROM produtos WHERE id = ?").run(id);
+    FirestoreSyncService.deleteProduto(id);
     res.json({ success: true, message: "Produto excluído com sucesso." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao excluir produto." });
@@ -421,7 +531,7 @@ app.get("/api/estoque/movimentacoes", authMiddleware, (req: AuthRequest, res: Re
   }
 });
 
-app.post("/api/estoque/movimentar", authMiddleware, requireRole(["admin", "gerente"]), (req: AuthRequest, res: Response) => {
+app.post("/api/estoque/movimentar", authMiddleware, requireRole(["admin", "gerente"]), async (req: AuthRequest, res: Response) => {
   try {
     const { produto_id, tipo, qtd, custo_unit, motivo } = req.body;
     const pId = parseInt(produto_id);
@@ -462,35 +572,44 @@ app.post("/api/estoque/movimentar", authMiddleware, requireRole(["admin", "geren
     }
 
     const now = new Date().toISOString();
+    const movId = await getNextSequence("movimentacoes");
 
-    // Begin transaction
-    db.exec("BEGIN TRANSACTION");
-    try {
-      db.prepare(`
-        UPDATE produtos SET estoque = ?, custo = ?, updated_at = ? WHERE id = ?
-      `).run(novaQtd, novoCusto, now, pId);
+    db.prepare(`
+      UPDATE produtos SET estoque = ?, custo = ?, updated_at = ? WHERE id = ?
+    `).run(novaQtd, novoCusto, now, pId);
 
-      db.prepare(`
-        INSERT INTO movimentacoes (produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        pId,
-        tipo,
-        tipo === "ajuste" ? novaQtd - qtdAnterior : quantidade,
-        qtdAnterior,
-        novaQtd,
-        parseFloat(custo_unit) || prod.custo,
-        motivo || "",
-        now,
-        req.user?.id || null
-      );
+    const movData = {
+      id: movId,
+      produto_id: pId,
+      tipo,
+      qtd: tipo === "ajuste" ? novaQtd - qtdAnterior : quantidade,
+      qtd_anterior: qtdAnterior,
+      qtd_nova: novaQtd,
+      custo_unit: parseFloat(custo_unit) || prod.custo,
+      motivo: motivo || "",
+      data: now,
+      user_id: req.user?.id || null,
+    };
 
-      db.exec("COMMIT");
-      res.json({ success: true, novoEstoque: novaQtd, novoCusto });
-    } catch (txErr) {
-      db.exec("ROLLBACK");
-      throw txErr;
-    }
+    db.prepare(`
+      INSERT INTO movimentacoes (id, produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      movId,
+      movData.produto_id,
+      movData.tipo,
+      movData.qtd,
+      movData.qtd_anterior,
+      movData.qtd_nova,
+      movData.custo_unit,
+      movData.motivo,
+      now,
+      movData.user_id
+    );
+
+    FirestoreSyncService.saveMovimentacaoEstoque(movData, pId, novaQtd, novoCusto);
+
+    res.json({ success: true, novoEstoque: novaQtd, novoCusto });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao processar movimentação: " + err.message });
   }
@@ -500,7 +619,6 @@ app.post("/api/estoque/movimentar", authMiddleware, requireRole(["admin", "geren
 /*                               API: VENDAS                                  */
 /* ========================================================================== */
 
-// Sales check policy for sellers: "oculta a tela de venda para vendedor"
 function canAccessSales(req: AuthRequest): boolean {
   if (!req.user) return false;
   const ocultar = getConfigValue("ocultarVendasVendedor", "1") === "1";
@@ -510,7 +628,7 @@ function canAccessSales(req: AuthRequest): boolean {
   return true;
 }
 
-// List Sales with Advanced Filters (por período)
+// List Sales with Advanced Filters
 app.get("/api/vendas", authMiddleware, (req: AuthRequest, res: Response) => {
   try {
     if (!canAccessSales(req)) {
@@ -567,7 +685,6 @@ app.get("/api/vendas", authMiddleware, (req: AuthRequest, res: Response) => {
       v.itens = getItens.all(v.id);
     });
 
-    // Compute metrics for the filtered period
     const totalFaturamento = vendas.reduce((sum, v) => sum + (v.total || 0), 0);
     const totalLucro = vendas.reduce((sum, v) => sum + (v.lucro || 0), 0);
     const totalDesconto = vendas.reduce((sum, v) => sum + (v.desconto || 0), 0);
@@ -590,7 +707,7 @@ app.get("/api/vendas", authMiddleware, (req: AuthRequest, res: Response) => {
 });
 
 // Finalize Sale
-app.post("/api/vendas", authMiddleware, (req: AuthRequest, res: Response) => {
+app.post("/api/vendas", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     if (!canAccessSales(req)) {
       res.status(403).json({ error: "Operação não autorizada: Vendedores não têm acesso para registrar vendas diretamente." });
@@ -629,107 +746,185 @@ app.post("/api/vendas", authMiddleware, (req: AuthRequest, res: Response) => {
     const lucro = total - custoTotal;
     const now = new Date().toISOString();
 
-    db.exec("BEGIN TRANSACTION");
-    try {
-      // 1. Create sale record
-      const insertVenda = db.prepare(`
-        INSERT INTO vendas (data, cliente_id, vendedor_id, subtotal, desconto, total, lucro, forma_pagamento, data_prevista, user_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        now,
-        clienteId ? parseInt(clienteId) : null,
-        vendedorId ? parseInt(vendedorId) : null,
-        subtotal,
-        valDesconto,
-        total,
-        lucro,
-        formaPagamento || "Dinheiro",
-        dataPrevista || null,
-        req.user?.id || null,
-        now
+    const vendaId = await getNextSequence("vendas");
+
+    // 1. Create sale record
+    const vendaData = {
+      id: vendaId,
+      data: now,
+      cliente_id: clienteId ? parseInt(clienteId) : null,
+      vendedor_id: vendedorId ? parseInt(vendedorId) : null,
+      subtotal,
+      desconto: valDesconto,
+      total,
+      lucro,
+      forma_pagamento: formaPagamento || "Dinheiro",
+      data_prevista: dataPrevista || null,
+      user_id: req.user?.id || null,
+      created_at: now,
+    };
+
+    db.prepare(`
+      INSERT INTO vendas (id, data, cliente_id, vendedor_id, subtotal, desconto, total, lucro, forma_pagamento, data_prevista, user_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      vendaId,
+      vendaData.data,
+      vendaData.cliente_id,
+      vendaData.vendedor_id,
+      vendaData.subtotal,
+      vendaData.desconto,
+      vendaData.total,
+      vendaData.lucro,
+      vendaData.forma_pagamento,
+      vendaData.data_prevista,
+      vendaData.user_id,
+      vendaData.created_at
+    );
+
+    // 2. Insert items and decrement stock
+    const itensToSync: any[] = [];
+    const movsToSync: any[] = [];
+
+    const insertItem = db.prepare(`
+      INSERT INTO itens_venda (id, venda_id, produto_id, nome, qtd, preco_unit, custo_unit, subtotal)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const updateStock = db.prepare(`
+      UPDATE produtos SET estoque = estoque - ?, updated_at = ? WHERE id = ?
+    `);
+    const insertMov = db.prepare(`
+      INSERT INTO movimentacoes (id, produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
+      VALUES (?, ?, 'saida', ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const item of itens) {
+      const itemId = await getNextSequence("itens_venda");
+      const movId = await getNextSequence("movimentacoes");
+
+      const itemRecord = {
+        id: itemId,
+        venda_id: vendaId,
+        produto_id: item.produtoId,
+        nome: item.nome,
+        qtd: item.qtd,
+        preco_unit: item.precoUnit,
+        custo_unit: item.custoUnit || 0,
+        subtotal: item.qtd * item.precoUnit,
+      };
+
+      insertItem.run(
+        itemRecord.id,
+        itemRecord.venda_id,
+        itemRecord.produto_id,
+        itemRecord.nome,
+        itemRecord.qtd,
+        itemRecord.preco_unit,
+        itemRecord.custo_unit,
+        itemRecord.subtotal
       );
+      itensToSync.push(itemRecord);
 
-      const vendaId = insertVenda.lastInsertRowid;
+      const currentProd = db.prepare("SELECT estoque, custo FROM produtos WHERE id = ?").get(item.produtoId) as any;
+      const novoEstoque = currentProd.estoque - item.qtd;
 
-      // 2. Insert items and decrement stock
-      const insertItem = db.prepare(`
-        INSERT INTO itens_venda (venda_id, produto_id, nome, qtd, preco_unit, custo_unit, subtotal)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
-      const updateStock = db.prepare(`
-        UPDATE produtos SET estoque = estoque - ?, updated_at = ? WHERE id = ?
-      `);
-      const insertMov = db.prepare(`
-        INSERT INTO movimentacoes (produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
-        VALUES (?, 'saida', ?, ?, ?, ?, ?, ?, ?)
-      `);
+      updateStock.run(item.qtd, now, item.produtoId);
 
-      for (const item of itens) {
-        insertItem.run(
-          vendaId,
-          item.produtoId,
-          item.nome,
-          item.qtd,
-          item.precoUnit,
-          item.custoUnit || 0,
-          item.qtd * item.precoUnit
-        );
+      const movRecord = {
+        id: movId,
+        produto_id: item.produtoId,
+        tipo: "saida",
+        qtd: item.qtd,
+        qtd_anterior: currentProd.estoque,
+        qtd_nova: novoEstoque,
+        custo_unit: currentProd.custo,
+        motivo: `Venda #${vendaId}`,
+        data: now,
+        user_id: req.user?.id || null,
+      };
 
-        const currentProd = db.prepare("SELECT estoque, custo FROM produtos WHERE id = ?").get(item.produtoId) as any;
-        const novoEstoque = currentProd.estoque - item.qtd;
-
-        updateStock.run(item.qtd, now, item.produtoId);
-
-        insertMov.run(
-          item.produtoId,
-          item.qtd,
-          currentProd.estoque,
-          novoEstoque,
-          currentProd.custo,
-          `Venda #${vendaId}`,
-          now,
-          req.user?.id || null
-        );
-      }
-
-      // 3. If Fiado, register debt in devedores table
-      if (formaPagamento === "Fiado" && clienteId) {
-        const cli = db.prepare("SELECT * FROM clientes WHERE id = ?").get(clienteId) as any;
-        let devedor = db.prepare("SELECT id FROM devedores WHERE cliente_id = ?").get(clienteId) as any;
-
-        let devedorId: number;
-        if (!devedor) {
-          const insertDev = db.prepare(`
-            INSERT INTO devedores (nome, telefone, cliente_id, data_prevista, created_at)
-            VALUES (?, ?, ?, ?, ?)
-          `).run(cli.nome, cli.telefone, cli.id, dataPrevista || null, now);
-          devedorId = insertDev.lastInsertRowid as number;
-        } else {
-          devedorId = devedor.id;
-          if (dataPrevista) {
-            db.prepare("UPDATE devedores SET data_prevista = ? WHERE id = ?").run(dataPrevista, devedorId);
-          }
-        }
-
-        db.prepare(`
-          INSERT INTO movimentos_devedor (devedor_id, tipo, valor, obs, data, user_id)
-          VALUES (?, 'divida', ?, ?, ?, ?)
-        `).run(devedorId, total, `Venda #${vendaId} (Fiado)`, now, req.user?.id || null);
-      }
-
-      db.exec("COMMIT");
-      res.json({ success: true, vendaId, total, lucro });
-    } catch (txErr) {
-      db.exec("ROLLBACK");
-      throw txErr;
+      insertMov.run(
+        movRecord.id,
+        movRecord.produto_id,
+        movRecord.qtd,
+        movRecord.qtd_anterior,
+        movRecord.qtd_nova,
+        movRecord.custo_unit,
+        movRecord.motivo,
+        movRecord.data,
+        movRecord.user_id
+      );
+      movsToSync.push(movRecord);
     }
+
+    // 3. If Fiado, register debt in devedores table
+    let devedorDataSync: any = null;
+    if (formaPagamento === "Fiado" && clienteId) {
+      const cli = db.prepare("SELECT * FROM clientes WHERE id = ?").get(clienteId) as any;
+      let devedor = db.prepare("SELECT id FROM devedores WHERE cliente_id = ?").get(clienteId) as any;
+
+      let devedorId: number;
+      let isNew = false;
+      let devedorRecord: any = null;
+
+      if (!devedor) {
+        isNew = true;
+        devedorId = await getNextSequence("devedores");
+        devedorRecord = {
+          id: devedorId,
+          nome: cli.nome,
+          telefone: cli.telefone,
+          cliente_id: cli.id,
+          data_prevista: dataPrevista || null,
+          created_at: now,
+        };
+        db.prepare(`
+          INSERT INTO devedores (id, nome, telefone, cliente_id, data_prevista, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(devedorId, devedorRecord.nome, devedorRecord.telefone, devedorRecord.cliente_id, devedorRecord.data_prevista, now);
+      } else {
+        devedorId = devedor.id;
+        devedorRecord = { id: devedorId };
+        if (dataPrevista) {
+          db.prepare("UPDATE devedores SET data_prevista = ? WHERE id = ?").run(dataPrevista, devedorId);
+        }
+      }
+
+      const movDevId = await getNextSequence("movimentos_devedor");
+      const movDevRecord = {
+        id: movDevId,
+        devedor_id: devedorId,
+        tipo: "divida",
+        valor: total,
+        obs: `Venda #${vendaId} (Fiado)`,
+        data: now,
+        user_id: req.user?.id || null,
+      };
+
+      db.prepare(`
+        INSERT INTO movimentos_devedor (id, devedor_id, tipo, valor, obs, data, user_id)
+        VALUES (?, ?, 'divida', ?, ?, ?, ?)
+      `).run(movDevId, devedorId, movDevRecord.valor, movDevRecord.obs, now, movDevRecord.user_id);
+
+      devedorDataSync = {
+        isNew,
+        devedor: devedorRecord,
+        data_prevista: dataPrevista,
+        movimento: movDevRecord,
+      };
+    }
+
+    // Persist completely to Cloud Firestore
+    FirestoreSyncService.saveVenda(vendaData, itensToSync, movsToSync, devedorDataSync);
+
+    res.json({ success: true, vendaId, total, lucro });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao registrar venda: " + err.message });
   }
 });
 
 // Cancel Sale (Admin only)
-app.delete("/api/vendas/:id", authMiddleware, requireRole(["admin"]), (req: AuthRequest, res: Response) => {
+app.delete("/api/vendas/:id", authMiddleware, requireRole(["admin"]), async (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const venda = db.prepare("SELECT * FROM vendas WHERE id = ?").get(id) as any;
@@ -739,41 +934,59 @@ app.delete("/api/vendas/:id", authMiddleware, requireRole(["admin"]), (req: Auth
     }
 
     const itens = db.prepare("SELECT * FROM itens_venda WHERE venda_id = ?").all(id) as any[];
+    const updateStock = db.prepare("UPDATE produtos SET estoque = estoque + ? WHERE id = ?");
+    const insertMov = db.prepare(`
+      INSERT INTO movimentacoes (id, produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
+      VALUES (?, ?, 'entrada', ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const now = new Date().toISOString();
 
-    db.exec("BEGIN TRANSACTION");
-    try {
-      // Restore stock for all items
-      const updateStock = db.prepare("UPDATE produtos SET estoque = estoque + ? WHERE id = ?");
-      const insertMov = db.prepare(`
-        INSERT INTO movimentacoes (produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
-        VALUES (?, 'entrada', ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const now = new Date().toISOString();
+    const restoredProducts: any[] = [];
+    const restoredMovs: any[] = [];
 
-      for (const item of itens) {
-        const prod = db.prepare("SELECT estoque, custo FROM produtos WHERE id = ?").get(item.produto_id) as any;
-        if (prod) {
-          updateStock.run(item.qtd, item.produto_id);
-          insertMov.run(
-            item.produto_id,
-            item.qtd,
-            prod.estoque,
-            prod.estoque + item.qtd,
-            prod.custo,
-            `Cancelamento da venda #${id}`,
-            now,
-            req.user?.id || null
-          );
-        }
+    for (const item of itens) {
+      const prod = db.prepare("SELECT estoque, custo FROM produtos WHERE id = ?").get(item.produto_id) as any;
+      if (prod) {
+        const movId = await getNextSequence("movimentacoes");
+        const novoEstoque = prod.estoque + item.qtd;
+        updateStock.run(item.qtd, item.produto_id);
+
+        const movData = {
+          id: movId,
+          produto_id: item.produto_id,
+          tipo: "entrada",
+          qtd: item.qtd,
+          qtd_anterior: prod.estoque,
+          qtd_nova: novoEstoque,
+          custo_unit: prod.custo,
+          motivo: `Cancelamento da venda #${id}`,
+          data: now,
+          user_id: req.user?.id || null,
+        };
+
+        insertMov.run(
+          movData.id,
+          movData.produto_id,
+          movData.qtd,
+          movData.qtd_anterior,
+          movData.qtd_nova,
+          movData.custo_unit,
+          movData.motivo,
+          now,
+          movData.user_id
+        );
+
+        restoredProducts.push({ id: item.produto_id, novoEstoque });
+        restoredMovs.push(movData);
       }
-
-      db.prepare("DELETE FROM vendas WHERE id = ?").run(id);
-      db.exec("COMMIT");
-      res.json({ success: true, message: "Venda cancelada e estoque restaurado com sucesso." });
-    } catch (txErr) {
-      db.exec("ROLLBACK");
-      throw txErr;
     }
+
+    db.prepare("DELETE FROM vendas WHERE id = ?").run(id);
+    db.prepare("DELETE FROM itens_venda WHERE venda_id = ?").run(id);
+
+    FirestoreSyncService.cancelVenda(id, restoredProducts, restoredMovs);
+
+    res.json({ success: true, message: "Venda cancelada e estoque restaurado na nuvem com sucesso." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao cancelar venda." });
   }
@@ -798,19 +1011,32 @@ app.get("/api/clientes", authMiddleware, (req: AuthRequest, res: Response) => {
   }
 });
 
-app.post("/api/clientes", authMiddleware, (req: AuthRequest, res: Response) => {
+app.post("/api/clientes", authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { nome, telefone, whatsapp } = req.body;
     if (!nome) {
       res.status(400).json({ error: "Nome do cliente é obrigatório." });
       return;
     }
-    const insert = db.prepare(`
-      INSERT INTO clientes (nome, telefone, whatsapp, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(nome.trim(), telefone || "", whatsapp || "", new Date().toISOString());
+    const newId = await getNextSequence("clientes");
+    const now = new Date().toISOString();
 
-    res.json({ success: true, id: insert.lastInsertRowid });
+    const cliData = {
+      id: newId,
+      nome: nome.trim(),
+      telefone: telefone || "",
+      whatsapp: whatsapp || "",
+      created_at: now,
+    };
+
+    db.prepare(`
+      INSERT INTO clientes (id, nome, telefone, whatsapp, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(newId, cliData.nome, cliData.telefone, cliData.whatsapp, now);
+
+    FirestoreSyncService.saveCliente(cliData);
+
+    res.json({ success: true, id: newId });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao salvar cliente." });
   }
@@ -820,11 +1046,27 @@ app.put("/api/clientes/:id", authMiddleware, (req: AuthRequest, res: Response) =
   try {
     const id = parseInt(req.params.id);
     const { nome, telefone, whatsapp } = req.body;
+
+    const existing = db.prepare("SELECT * FROM clientes WHERE id = ?").get(id) as any;
+    if (!existing) {
+      res.status(404).json({ error: "Cliente não encontrado." });
+      return;
+    }
+
+    const updated = {
+      ...existing,
+      nome: nome.trim(),
+      telefone: telefone || "",
+      whatsapp: whatsapp || "",
+    };
+
     db.prepare(`
       UPDATE clientes SET nome = ?, telefone = ?, whatsapp = ? WHERE id = ?
-    `).run(nome.trim(), telefone || "", whatsapp || "", id);
+    `).run(updated.nome, updated.telefone, updated.whatsapp, id);
 
-    res.json({ success: true, message: "Cliente atualizado." });
+    FirestoreSyncService.saveCliente(updated);
+
+    res.json({ success: true, message: "Cliente atualizado na nuvem." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao atualizar cliente." });
   }
@@ -834,6 +1076,7 @@ app.delete("/api/clientes/:id", authMiddleware, requireRole(["admin", "gerente"]
   try {
     const id = parseInt(req.params.id);
     db.prepare("DELETE FROM clientes WHERE id = ?").run(id);
+    FirestoreSyncService.deleteCliente(id);
     res.json({ success: true, message: "Cliente removido." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao excluir cliente." });
@@ -903,7 +1146,7 @@ app.get("/api/devedores/:id", authMiddleware, requireRole(["admin", "gerente", "
   }
 });
 
-app.post("/api/devedores", authMiddleware, requireRole(["admin", "gerente", "caixa"]), (req: AuthRequest, res: Response) => {
+app.post("/api/devedores", authMiddleware, requireRole(["admin", "gerente", "caixa"]), async (req: AuthRequest, res: Response) => {
   try {
     const { nome, telefone, valor, dataVenda, dataPrevista } = req.body;
     if (!nome || !valor || parseFloat(valor) <= 0) {
@@ -913,33 +1156,47 @@ app.post("/api/devedores", authMiddleware, requireRole(["admin", "gerente", "cai
 
     const now = new Date().toISOString();
     const dataOperacao = dataVenda ? new Date(dataVenda).toISOString() : now;
+    const devId = await getNextSequence("devedores");
+    const movId = await getNextSequence("movimentos_devedor");
 
-    db.exec("BEGIN TRANSACTION");
-    try {
-      const insertDev = db.prepare(`
-        INSERT INTO devedores (nome, telefone, cliente_id, data_prevista, created_at)
-        VALUES (?, ?, NULL, ?, ?)
-      `).run(nome.trim(), telefone || "", dataPrevista || null, now);
+    const devedorData = {
+      id: devId,
+      nome: nome.trim(),
+      telefone: telefone || "",
+      cliente_id: null,
+      data_prevista: dataPrevista || null,
+      created_at: now,
+    };
 
-      const devId = insertDev.lastInsertRowid;
+    const movData = {
+      id: movId,
+      devedor_id: devId,
+      tipo: "divida",
+      valor: parseFloat(valor),
+      obs: "Cadastro inicial de dívida",
+      data: dataOperacao,
+      user_id: req.user?.id || null,
+    };
 
-      db.prepare(`
-        INSERT INTO movimentos_devedor (devedor_id, tipo, valor, obs, data, user_id)
-        VALUES (?, 'divida', ?, 'Cadastro inicial de dívida', ?, ?)
-      `).run(devId, parseFloat(valor), dataOperacao, req.user?.id || null);
+    db.prepare(`
+      INSERT INTO devedores (id, nome, telefone, cliente_id, data_prevista, created_at)
+      VALUES (?, ?, ?, NULL, ?, ?)
+    `).run(devId, devedorData.nome, devedorData.telefone, devedorData.data_prevista, now);
 
-      db.exec("COMMIT");
-      res.json({ success: true, id: devId });
-    } catch (txErr) {
-      db.exec("ROLLBACK");
-      throw txErr;
-    }
+    db.prepare(`
+      INSERT INTO movimentos_devedor (id, devedor_id, tipo, valor, obs, data, user_id)
+      VALUES (?, ?, 'divida', ?, 'Cadastro inicial de dívida', ?, ?)
+    `).run(movId, devId, movData.valor, dataOperacao, movData.user_id);
+
+    FirestoreSyncService.saveDevedor(devedorData, movData);
+
+    res.json({ success: true, id: devId });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao cadastrar devedor." });
   }
 });
 
-app.post("/api/devedores/:id/movimento", authMiddleware, requireRole(["admin", "gerente", "caixa"]), (req: AuthRequest, res: Response) => {
+app.post("/api/devedores/:id/movimento", authMiddleware, requireRole(["admin", "gerente", "caixa"]), async (req: AuthRequest, res: Response) => {
   try {
     const devedorId = parseInt(req.params.id);
     const { tipo, valor, obs } = req.body;
@@ -949,19 +1206,27 @@ app.post("/api/devedores/:id/movimento", authMiddleware, requireRole(["admin", "
       return;
     }
 
-    db.prepare(`
-      INSERT INTO movimentos_devedor (devedor_id, tipo, valor, obs, data, user_id)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      devedorId,
-      tipo,
-      parseFloat(valor),
-      obs || "",
-      new Date().toISOString(),
-      req.user?.id || null
-    );
+    const movId = await getNextSequence("movimentos_devedor");
+    const now = new Date().toISOString();
 
-    res.json({ success: true, message: "Movimentação registrada com sucesso." });
+    const movData = {
+      id: movId,
+      devedor_id: devedorId,
+      tipo,
+      valor: parseFloat(valor),
+      obs: obs || "",
+      data: now,
+      user_id: req.user?.id || null,
+    };
+
+    db.prepare(`
+      INSERT INTO movimentos_devedor (id, devedor_id, tipo, valor, obs, data, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(movId, devedorId, tipo, movData.valor, movData.obs, now, movData.user_id);
+
+    FirestoreSyncService.saveMovimentoDevedor(movData);
+
+    res.json({ success: true, message: "Movimentação registrada com sucesso na nuvem." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao registrar movimento." });
   }
@@ -980,19 +1245,33 @@ app.get("/api/vendedores", authMiddleware, (req: AuthRequest, res: Response) => 
   }
 });
 
-app.post("/api/vendedores", authMiddleware, requireRole(["admin", "gerente"]), (req: AuthRequest, res: Response) => {
+app.post("/api/vendedores", authMiddleware, requireRole(["admin", "gerente"]), async (req: AuthRequest, res: Response) => {
   try {
     const { nome, comissao_percentual, ativo } = req.body;
     if (!nome) {
       res.status(400).json({ error: "Nome do vendedor é obrigatório." });
       return;
     }
-    const insert = db.prepare(`
-      INSERT INTO vendedores (nome, comissao_percentual, ativo, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(nome.trim(), parseFloat(comissao_percentual) || 0, ativo ? 1 : 0, new Date().toISOString());
+    const newId = await getNextSequence("vendedores");
+    const now = new Date().toISOString();
 
-    res.json({ success: true, id: insert.lastInsertRowid });
+    const venData = {
+      id: newId,
+      nome: nome.trim(),
+      comissao_percentual: parseFloat(comissao_percentual) || 0,
+      ativo: ativo ? 1 : 0,
+      user_id: null,
+      created_at: now,
+    };
+
+    db.prepare(`
+      INSERT INTO vendedores (id, nome, comissao_percentual, ativo, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(newId, venData.nome, venData.comissao_percentual, venData.ativo, now);
+
+    FirestoreSyncService.saveVendedor(venData);
+
+    res.json({ success: true, id: newId });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao salvar vendedor." });
   }
@@ -1002,11 +1281,27 @@ app.put("/api/vendedores/:id", authMiddleware, requireRole(["admin", "gerente"])
   try {
     const id = parseInt(req.params.id);
     const { nome, comissao_percentual, ativo } = req.body;
+
+    const existing = db.prepare("SELECT * FROM vendedores WHERE id = ?").get(id) as any;
+    if (!existing) {
+      res.status(404).json({ error: "Vendedor não encontrado." });
+      return;
+    }
+
+    const updated = {
+      ...existing,
+      nome: nome.trim(),
+      comissao_percentual: parseFloat(comissao_percentual) || 0,
+      ativo: ativo ? 1 : 0,
+    };
+
     db.prepare(`
       UPDATE vendedores SET nome = ?, comissao_percentual = ?, ativo = ? WHERE id = ?
-    `).run(nome.trim(), parseFloat(comissao_percentual) || 0, ativo ? 1 : 0, id);
+    `).run(updated.nome, updated.comissao_percentual, updated.ativo, id);
 
-    res.json({ success: true, message: "Vendedor atualizado." });
+    FirestoreSyncService.saveVendedor(updated);
+
+    res.json({ success: true, message: "Vendedor atualizado na nuvem." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao atualizar vendedor." });
   }
@@ -1016,6 +1311,7 @@ app.delete("/api/vendedores/:id", authMiddleware, requireRole(["admin", "gerente
   try {
     const id = parseInt(req.params.id);
     db.prepare("DELETE FROM vendedores WHERE id = ?").run(id);
+    FirestoreSyncService.deleteVendedor(id);
     res.json({ success: true, message: "Vendedor excluído." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao excluir vendedor." });
@@ -1179,19 +1475,17 @@ app.get("/api/relatorios/dashboard", authMiddleware, (req: AuthRequest, res: Res
   }
 });
 
-// Detailed Monthly Performance Reports: "relatórios de desempenho mensais detalhados"
+// Detailed Monthly Performance Reports
 app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente"]), (req: AuthRequest, res: Response) => {
   try {
     const ano = parseInt(req.query.ano as string) || new Date().getFullYear();
     const mes = parseInt(req.query.mes as string) || (new Date().getMonth() + 1); // 1-12
 
-    // Date bounds for the requested month
     const mesFormatado = mes < 10 ? `0${mes}` : `${mes}`;
     const inicioMes = `${ano}-${mesFormatado}-01`;
     const diasNoMes = new Date(ano, mes, 0).getDate();
     const fimMes = `${ano}-${mesFormatado}-${diasNoMes < 10 ? '0' + diasNoMes : diasNoMes}`;
 
-    // 1. All sales in the month
     const vendas = db.prepare(`
       SELECT v.*, c.nome as cliente_nome, ven.nome as vendedor_nome, ven.comissao_percentual
       FROM vendas v
@@ -1201,7 +1495,6 @@ app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente
       ORDER BY v.data ASC
     `).all(inicioMes, fimMes) as any[];
 
-    // Fetch items
     const getItens = db.prepare(`
       SELECT iv.*, p.categoria, p.marca
       FROM itens_venda iv
@@ -1215,17 +1508,15 @@ app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente
       v.itens.forEach((it: any) => todosItens.push(it));
     });
 
-    // 2. High-level KPIs
     const faturamentoBruto = vendas.reduce((s, v) => s + v.total, 0);
     const subtotalBruto = vendas.reduce((s, v) => s + v.subtotal, 0);
     const totalDescontos = vendas.reduce((s, v) => s + v.desconto, 0);
     const lucroBruto = vendas.reduce((s, v) => s + v.lucro, 0);
-    const cmv = faturamentoBruto - lucroBruto; // Cost of goods sold
+    const cmv = faturamentoBruto - lucroBruto;
     const margemPercentual = faturamentoBruto > 0 ? (lucroBruto / faturamentoBruto) * 100 : 0;
     const qtdVendas = vendas.length;
     const ticketMedio = qtdVendas > 0 ? faturamentoBruto / qtdVendas : 0;
 
-    // 3. Breakdown by Payment Method
     const formasPagamentoMap: Record<string, { qtd: number; total: number }> = {};
     ["Dinheiro", "PIX", "Cartão", "Fiado"].forEach((f) => {
       formasPagamentoMap[f] = { qtd: 0, total: 0 };
@@ -1245,7 +1536,6 @@ app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente
       percentual: faturamentoBruto > 0 ? (formasPagamentoMap[forma].total / faturamentoBruto) * 100 : 0,
     }));
 
-    // 4. Breakdown by Seller (Vendedor)
     const vendedoresCadastrados = db.prepare("SELECT id, nome, comissao_percentual FROM vendedores").all() as any[];
     const vendedoresMap: Record<string, { nome: string; qtd: number; total: number; comissaoTaxa: number; comissaoTotal: number }> = {};
 
@@ -1292,7 +1582,6 @@ app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente
       }))
       .sort((a, b) => b.total - a.total);
 
-    // 5. Ranking Top Products Sold
     const produtosMap: Record<number, { nome: string; marca: string; categoria: string; qtd: number; faturamento: number; custo: number; lucro: number }> = {};
 
     todosItens.forEach((it) => {
@@ -1323,7 +1612,6 @@ app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente
       }))
       .sort((a, b) => b.faturamento - a.faturamento);
 
-    // 6. Breakdown by Category
     const categoriasMap: Record<string, { categoria: string; qtd: number; faturamento: number; lucro: number }> = {};
     topProdutos.forEach((p) => {
       const cat = p.categoria || "Outros";
@@ -1337,7 +1625,6 @@ app.get("/api/relatorios/mensal", authMiddleware, requireRole(["admin", "gerente
 
     const desempenhoCategorias = Object.values(categoriasMap).sort((a, b) => b.faturamento - a.faturamento);
 
-    // 7. Daily sales timeline (day 1 to end of month)
     const evolucaoDiaria = Array.from({ length: diasNoMes }, (_, idx) => {
       const diaNum = idx + 1;
       const diaStr = diaNum < 10 ? `0${diaNum}` : `${diaNum}`;
@@ -1410,7 +1697,7 @@ app.get("/api/backup/export", authMiddleware, requireRole(["admin"]), (req: Auth
   }
 });
 
-app.post("/api/backup/import", authMiddleware, requireRole(["admin"]), (req: AuthRequest, res: Response) => {
+app.post("/api/backup/import", authMiddleware, requireRole(["admin"]), async (req: AuthRequest, res: Response) => {
   try {
     const data = req.body;
     if (!data || !Array.isArray(data.produtos)) {
@@ -1418,106 +1705,102 @@ app.post("/api/backup/import", authMiddleware, requireRole(["admin"]), (req: Aut
       return;
     }
 
-    db.exec("BEGIN TRANSACTION");
-    try {
-      // Clear data except current admin user session
-      db.prepare("DELETE FROM movimentacoes").run();
-      db.prepare("DELETE FROM itens_venda").run();
-      db.prepare("DELETE FROM vendas").run();
-      db.prepare("DELETE FROM movimentos_devedor").run();
-      db.prepare("DELETE FROM devedores").run();
-      db.prepare("DELETE FROM clientes").run();
-      db.prepare("DELETE FROM produtos").run();
-      db.prepare("DELETE FROM vendedores").run();
+    // Clear data in local cache
+    db.prepare("DELETE FROM movimentacoes").run();
+    db.prepare("DELETE FROM itens_venda").run();
+    db.prepare("DELETE FROM vendas").run();
+    db.prepare("DELETE FROM movimentos_devedor").run();
+    db.prepare("DELETE FROM devedores").run();
+    db.prepare("DELETE FROM clientes").run();
+    db.prepare("DELETE FROM produtos").run();
+    db.prepare("DELETE FROM vendedores").run();
 
-      // Restore products
-      const insertProd = db.prepare(`
-        INSERT INTO produtos (id, nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    // Restore products
+    const insertProd = db.prepare(`
+      INSERT INTO produtos (id, nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const p of data.produtos) {
+      insertProd.run(
+        p.id, p.nome, p.marca || "", p.categoria || "", p.sabor || "", p.peso || "",
+        p.codigo_interno || p.codigoInterno || "", p.codigo_barras || p.codigoBarras || "",
+        p.custo || 0, p.venda || 0, p.estoque || 0, p.minimo || 5, p.foto || "",
+        p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()
+      );
+    }
+
+    // Restore clients
+    if (Array.isArray(data.clientes)) {
+      const insertCli = db.prepare(`
+        INSERT INTO clientes (id, nome, telefone, whatsapp, created_at)
+        VALUES (?, ?, ?, ?, ?)
       `);
-      for (const p of data.produtos) {
-        insertProd.run(
-          p.id, p.nome, p.marca || "", p.categoria || "", p.sabor || "", p.peso || "",
-          p.codigo_interno || p.codigoInterno || "", p.codigo_barras || p.codigoBarras || "",
-          p.custo || 0, p.venda || 0, p.estoque || 0, p.minimo || 5, p.foto || "",
-          p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()
+      for (const c of data.clientes) {
+        insertCli.run(c.id, c.nome, c.telefone || "", c.whatsapp || "", c.created_at || new Date().toISOString());
+      }
+    }
+
+    // Restore sellers
+    if (Array.isArray(data.vendedores)) {
+      const insertVen = db.prepare(`
+        INSERT INTO vendedores (id, nome, comissao_percentual, ativo, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const v of data.vendedores) {
+        insertVen.run(v.id, v.nome, v.comissao_percentual || v.comissaoPercentual || 0, v.ativo !== undefined ? (v.ativo ? 1 : 0) : 1, v.user_id || null, v.created_at || new Date().toISOString());
+      }
+    }
+
+    // Restore sales & items
+    if (Array.isArray(data.vendas)) {
+      const insertVenda = db.prepare(`
+        INSERT INTO vendas (id, data, cliente_id, vendedor_id, subtotal, desconto, total, lucro, forma_pagamento, data_prevista, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const v of data.vendas) {
+        insertVenda.run(
+          v.id, v.data, v.cliente_id || v.clienteId || null, v.vendedor_id || v.vendedorId || null,
+          v.subtotal || 0, v.desconto || 0, v.total || 0, v.lucro || 0, v.forma_pagamento || v.formaPagamento || "Dinheiro",
+          v.data_prevista || v.dataPrevista || null, v.user_id || null, v.created_at || v.data
         );
       }
-
-      // Restore clients
-      if (Array.isArray(data.clientes)) {
-        const insertCli = db.prepare(`
-          INSERT INTO clientes (id, nome, telefone, whatsapp, created_at)
-          VALUES (?, ?, ?, ?, ?)
-        `);
-        for (const c of data.clientes) {
-          insertCli.run(c.id, c.nome, c.telefone || "", c.whatsapp || "", c.created_at || new Date().toISOString());
-        }
-      }
-
-      // Restore sellers
-      if (Array.isArray(data.vendedores)) {
-        const insertVen = db.prepare(`
-          INSERT INTO vendedores (id, nome, comissao_percentual, ativo, user_id, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
-        for (const v of data.vendedores) {
-          insertVen.run(v.id, v.nome, v.comissao_percentual || v.comissaoPercentual || 0, v.ativo !== undefined ? (v.ativo ? 1 : 0) : 1, v.user_id || null, v.created_at || new Date().toISOString());
-        }
-      }
-
-      // Restore sales & items
-      if (Array.isArray(data.vendas)) {
-        const insertVenda = db.prepare(`
-          INSERT INTO vendas (id, data, cliente_id, vendedor_id, subtotal, desconto, total, lucro, forma_pagamento, data_prevista, user_id, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        for (const v of data.vendas) {
-          insertVenda.run(
-            v.id, v.data, v.cliente_id || v.clienteId || null, v.vendedor_id || v.vendedorId || null,
-            v.subtotal || 0, v.desconto || 0, v.total || 0, v.lucro || 0, v.forma_pagamento || v.formaPagamento || "Dinheiro",
-            v.data_prevista || v.dataPrevista || null, v.user_id || null, v.created_at || v.data
-          );
-        }
-      }
-
-      if (Array.isArray(data.itens_venda)) {
-        const insertItem = db.prepare(`
-          INSERT INTO itens_venda (id, venda_id, produto_id, nome, qtd, preco_unit, custo_unit, subtotal)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        for (const it of data.itens_venda) {
-          insertItem.run(it.id, it.venda_id || it.vendaId, it.produto_id || it.produtoId, it.nome, it.qtd, it.preco_unit || it.precoUnit, it.custo_unit || it.custoUnit, it.subtotal || (it.qtd * it.preco_unit));
-        }
-      }
-
-      // Restore debtors
-      if (Array.isArray(data.devedores)) {
-        const insertDev = db.prepare(`
-          INSERT INTO devedores (id, nome, telefone, cliente_id, data_prevista, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
-        for (const d of data.devedores) {
-          insertDev.run(d.id, d.nome, d.telefone || "", d.cliente_id || d.clienteId || null, d.data_prevista || d.dataPrevista || null, d.created_at || new Date().toISOString());
-        }
-      }
-
-      if (Array.isArray(data.movimentos_devedor)) {
-        const insertMovDev = db.prepare(`
-          INSERT INTO movimentos_devedor (id, devedor_id, tipo, valor, obs, data, user_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `);
-        for (const m of data.movimentos_devedor) {
-          insertMovDev.run(m.id, m.devedor_id || m.devedorId, m.tipo, m.valor, m.obs || "", m.data, m.user_id || null);
-        }
-      }
-
-      db.exec("COMMIT");
-      res.json({ success: true, message: "Backup restaurado com sucesso no banco de dados." });
-    } catch (txErr) {
-      db.exec("ROLLBACK");
-      throw txErr;
     }
+
+    if (Array.isArray(data.itens_venda)) {
+      const insertItem = db.prepare(`
+        INSERT INTO itens_venda (id, venda_id, produto_id, nome, qtd, preco_unit, custo_unit, subtotal)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const it of data.itens_venda) {
+        insertItem.run(it.id, it.venda_id || it.vendaId, it.produto_id || it.produtoId, it.nome, it.qtd, it.preco_unit || it.precoUnit, it.custo_unit || it.custoUnit, it.subtotal || (it.qtd * it.preco_unit));
+      }
+    }
+
+    // Restore debtors
+    if (Array.isArray(data.devedores)) {
+      const insertDev = db.prepare(`
+        INSERT INTO devedores (id, nome, telefone, cliente_id, data_prevista, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const d of data.devedores) {
+        insertDev.run(d.id, d.nome, d.telefone || "", d.cliente_id || d.clienteId || null, d.data_prevista || d.dataPrevista || null, d.created_at || new Date().toISOString());
+      }
+    }
+
+    if (Array.isArray(data.movimentos_devedor)) {
+      const insertMovDev = db.prepare(`
+        INSERT INTO movimentos_devedor (id, devedor_id, tipo, valor, obs, data, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const m of data.movimentos_devedor) {
+        insertMovDev.run(m.id, m.devedor_id || m.devedorId, m.tipo, m.valor, m.obs || "", m.data, m.user_id || null);
+      }
+    }
+
+    // Sync cloud database
+    await FirestoreSyncService.restoreFullCloudBackup(data);
+
+    res.json({ success: true, message: "Backup restaurado com sucesso no banco de dados em nuvem." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao restaurar backup: " + err.message });
   }
@@ -1527,12 +1810,10 @@ app.post("/api/backup/import", authMiddleware, requireRole(["admin"]), (req: Aut
 /*                               API FALLBACK & ERROS                         */
 /* ========================================================================== */
 
-// Fallback para qualquer rota /api que não foi tratada - garante que JAMAIS retorne o HTML do Vite
 app.all("/api/*", (req: Request, res: Response) => {
   res.status(404).json({ error: `Rota de API não encontrada: ${req.method} ${req.path}` });
 });
 
-// Middleware para tratamento global de erros da API
 app.use("/api", (err: any, req: Request, res: Response, next: NextFunction) => {
   console.error("[API Error]", err);
   res.status(err.status || 500).json({ error: err.message || "Erro interno do servidor." });
@@ -1558,7 +1839,7 @@ async function start() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[AppVenda] Servidor operacional em http://localhost:${PORT}`);
+    console.log(`[AppVenda] Servidor operacional com Firestore em http://localhost:${PORT}`);
   });
 }
 

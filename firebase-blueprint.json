@@ -1,0 +1,226 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user account",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "nome": { "type": "string" },
+        "email": { "type": "string" },
+        "password_hash": { "type": "string" },
+        "salt": { "type": "string" },
+        "role": { "type": "string" },
+        "ativo": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["username", "nome", "email", "password_hash", "salt", "role"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "User login session token",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string" },
+        "user_id": { "type": "number" },
+        "expires_at": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["token", "user_id", "expires_at"]
+    },
+    "Config": {
+      "title": "Config",
+      "description": "System configuration key-value store",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "string" }
+      },
+      "required": ["key", "value"]
+    },
+    "Vendedor": {
+      "title": "Vendedor",
+      "description": "Store salesperson",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "comissao_percentual": { "type": "number" },
+        "ativo": { "type": "number" },
+        "user_id": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["nome"]
+    },
+    "Produto": {
+      "title": "Produto",
+      "description": "Store product in stock catalog",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "marca": { "type": "string" },
+        "categoria": { "type": "string" },
+        "sabor": { "type": "string" },
+        "peso": { "type": "string" },
+        "codigo_interno": { "type": "string" },
+        "codigo_barras": { "type": "string" },
+        "custo": { "type": "number" },
+        "venda": { "type": "number" },
+        "estoque": { "type": "number" },
+        "minimo": { "type": "number" },
+        "foto": { "type": "string" },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["nome", "custo", "venda"]
+    },
+    "Cliente": {
+      "title": "Cliente",
+      "description": "Store customer record",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "telefone": { "type": "string" },
+        "whatsapp": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["nome"]
+    },
+    "Venda": {
+      "title": "Venda",
+      "description": "Sales record",
+      "type": "object",
+      "properties": {
+        "data": { "type": "string" },
+        "cliente_id": { "type": "number" },
+        "vendedor_id": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "desconto": { "type": "number" },
+        "total": { "type": "number" },
+        "lucro": { "type": "number" },
+        "forma_pagamento": { "type": "string" },
+        "data_prevista": { "type": "string" },
+        "user_id": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["data", "subtotal", "total", "forma_pagamento"]
+    },
+    "ItemVenda": {
+      "title": "ItemVenda",
+      "description": "Item of a sale",
+      "type": "object",
+      "properties": {
+        "venda_id": { "type": "number" },
+        "produto_id": { "type": "number" },
+        "nome": { "type": "string" },
+        "qtd": { "type": "number" },
+        "preco_unit": { "type": "number" },
+        "custo_unit": { "type": "number" },
+        "subtotal": { "type": "number" }
+      },
+      "required": ["venda_id", "produto_id", "nome", "qtd", "preco_unit"]
+    },
+    "Devedor": {
+      "title": "Devedor",
+      "description": "Debtor customer",
+      "type": "object",
+      "properties": {
+        "nome": { "type": "string" },
+        "telefone": { "type": "string" },
+        "cliente_id": { "type": "number" },
+        "data_prevista": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["nome"]
+    },
+    "MovimentoDevedor": {
+      "title": "MovimentoDevedor",
+      "description": "Debt or payment transaction for a debtor",
+      "type": "object",
+      "properties": {
+        "devedor_id": { "type": "number" },
+        "tipo": { "type": "string" },
+        "valor": { "type": "number" },
+        "obs": { "type": "string" },
+        "data": { "type": "string" },
+        "user_id": { "type": "number" }
+      },
+      "required": ["devedor_id", "tipo", "valor", "data"]
+    },
+    "Movimentacao": {
+      "title": "Movimentacao",
+      "description": "Stock inventory movement",
+      "type": "object",
+      "properties": {
+        "produto_id": { "type": "number" },
+        "tipo": { "type": "string" },
+        "qtd": { "type": "number" },
+        "qtd_anterior": { "type": "number" },
+        "qtd_nova": { "type": "number" },
+        "custo_unit": { "type": "number" },
+        "motivo": { "type": "string" },
+        "data": { "type": "string" },
+        "user_id": { "type": "number" }
+      },
+      "required": ["produto_id", "tipo", "qtd", "data"]
+    },
+    "DatabaseCounter": {
+      "title": "DatabaseCounter",
+      "description": "Atomic incremental counter for document tables",
+      "type": "object",
+      "properties": {
+        "last_id": { "type": "number" }
+      },
+      "required": ["last_id"]
+    }
+  },
+  "firestore": {
+    "users": {
+      "schema": "User",
+      "description": "Users collection"
+    },
+    "sessions": {
+      "schema": "Session",
+      "description": "Sessions collection"
+    },
+    "config": {
+      "schema": "Config",
+      "description": "Config collection"
+    },
+    "vendedores": {
+      "schema": "Vendedor",
+      "description": "Vendedores collection"
+    },
+    "produtos": {
+      "schema": "Produto",
+      "description": "Produtos catalog collection"
+    },
+    "clientes": {
+      "schema": "Cliente",
+      "description": "Clientes collection"
+    },
+    "vendas": {
+      "schema": "Venda",
+      "description": "Vendas collection"
+    },
+    "itens_venda": {
+      "schema": "ItemVenda",
+      "description": "Itens de venda collection"
+    },
+    "devedores": {
+      "schema": "Devedor",
+      "description": "Devedores collection"
+    },
+    "movimentos_devedor": {
+      "schema": "MovimentoDevedor",
+      "description": "Movimentações de fiado/devedor"
+    },
+    "movimentacoes": {
+      "schema": "Movimentacao",
+      "description": "Movimentações de estoque"
+    },
+    "_counters": {
+      "schema": "DatabaseCounter",
+      "description": "Incremental ID sequence generators"
+    }
+  }
+}

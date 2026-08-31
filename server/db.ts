@@ -2,8 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { firestore, cloudDb, getNextSequence } from "./firestore-db.ts";
 
-// Ensure data directory exists
+// Ensure data directory exists for local cache
 const DATA_DIR = path.join(process.cwd(), "data");
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -28,14 +29,14 @@ export function generateToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
-// Initialize tables
+// Initialize tables in SQLite local cache
 export function initDatabase() {
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
 
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
       nome TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
@@ -60,7 +61,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS vendedores (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       nome TEXT NOT NULL,
       comissao_percentual REAL NOT NULL DEFAULT 0,
       ativo INTEGER NOT NULL DEFAULT 1,
@@ -69,7 +70,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS produtos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       nome TEXT NOT NULL,
       marca TEXT,
       categoria TEXT,
@@ -87,7 +88,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS movimentacoes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       produto_id INTEGER NOT NULL,
       tipo TEXT NOT NULL,
       qtd REAL NOT NULL,
@@ -100,7 +101,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS clientes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       nome TEXT NOT NULL,
       telefone TEXT,
       whatsapp TEXT,
@@ -108,7 +109,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS vendas (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       data TEXT NOT NULL,
       cliente_id INTEGER,
       vendedor_id INTEGER,
@@ -123,7 +124,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS itens_venda (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       venda_id INTEGER NOT NULL,
       produto_id INTEGER NOT NULL,
       nome TEXT NOT NULL,
@@ -135,7 +136,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS devedores (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       nome TEXT NOT NULL,
       telefone TEXT,
       cliente_id INTEGER,
@@ -144,7 +145,7 @@ export function initDatabase() {
     );
 
     CREATE TABLE IF NOT EXISTS movimentos_devedor (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id INTEGER PRIMARY KEY,
       devedor_id INTEGER NOT NULL,
       tipo TEXT NOT NULL,
       valor REAL NOT NULL,
@@ -154,123 +155,478 @@ export function initDatabase() {
       FOREIGN KEY (devedor_id) REFERENCES devedores(id) ON DELETE CASCADE
     );
   `);
+}
 
-  // Seed default config if missing
-  const setConfig = db.prepare("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)");
-  setConfig.run("nomeLoja", "Loja de Suplementos & Nutrição");
-  setConfig.run("logo", "");
-  setConfig.run("ocultarVendasVendedor", "1"); // By default: oculta tela de venda para vendedor
-  setConfig.run("versao", "2.0.0");
+// Real-time synchronization layer with Cloud Firestore
+export class FirestoreSyncService {
+  private static synced = false;
 
-  // Seed default admin and vendedor users if users table is empty
-  const userCountQuery = db.prepare("SELECT COUNT(*) as count FROM users");
-  const result = userCountQuery.get() as { count: number };
+  // Hydrate local cache directly from Cloud Firestore
+  static async syncFromCloud(): Promise<void> {
+    try {
+      await cloudDb.init();
 
-  if (result.count === 0) {
-    const now = new Date().toISOString();
-    const insertUser = db.prepare(`
-      INSERT INTO users (username, nome, email, password_hash, salt, role, ativo, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-    `);
+      console.log("[Firestore Sync] Sincronizando dados em nuvem para cache local...");
 
-    // 1. Admin user: admin@loja.com / admin123
-    const adminPass = hashPassword("admin123");
-    insertUser.run("admin", "Administrador do Sistema", "admin@loja.com", adminPass.hash, adminPass.salt, "admin", now);
+      // 1. Config
+      const configSnap = await firestore.collection("config").get();
+      const insertConfig = db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+      configSnap.forEach((doc) => {
+        const d = doc.data();
+        insertConfig.run(d.key, String(d.value));
+      });
 
-    // 2. Vendedor user: vendedor@loja.com / vendedor123
-    const vendPass = hashPassword("vendedor123");
-    insertUser.run("vendedor", "Carlos Silva (Vendedor)", "vendedor@loja.com", vendPass.hash, vendPass.salt, "vendedor", now);
+      // 2. Users
+      const usersSnap = await firestore.collection("users").get();
+      const insertUser = db.prepare(`
+        INSERT OR REPLACE INTO users (id, username, nome, email, password_hash, salt, role, ativo, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      usersSnap.forEach((doc) => {
+        const u = doc.data();
+        insertUser.run(
+          Number(u.id || doc.id),
+          u.username,
+          u.nome,
+          u.email,
+          u.password_hash,
+          u.salt,
+          u.role || "vendedor",
+          u.ativo !== undefined ? (u.ativo ? 1 : 0) : 1,
+          u.created_at || new Date().toISOString()
+        );
+      });
 
-    // 3. Caixa user: caixa@loja.com / caixa123
-    const caixaPass = hashPassword("caixa123");
-    insertUser.run("caixa", "Ana Paula (Operador de Caixa)", "caixa@loja.com", caixaPass.hash, caixaPass.salt, "caixa", now);
+      // 3. Sessions
+      const sessionsSnap = await firestore.collection("sessions").get();
+      const insertSession = db.prepare(`
+        INSERT OR REPLACE INTO sessions (token, user_id, expires_at, created_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      sessionsSnap.forEach((doc) => {
+        const s = doc.data();
+        insertSession.run(s.token, Number(s.user_id), s.expires_at, s.created_at);
+      });
 
-    // Seed default sellers
-    const insertVendedor = db.prepare(`
-      INSERT INTO vendedores (nome, comissao_percentual, ativo, user_id, created_at)
-      VALUES (?, ?, 1, ?, ?)
-    `);
-    insertVendedor.run("Carlos Silva", 5.0, 2, now);
-    insertVendedor.run("Mariana Santos", 6.0, null, now);
-    insertVendedor.run("Lucas Lima", 4.5, null, now);
+      // 4. Vendedores
+      const venSnap = await firestore.collection("vendedores").get();
+      const insertVen = db.prepare(`
+        INSERT OR REPLACE INTO vendedores (id, nome, comissao_percentual, ativo, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      venSnap.forEach((doc) => {
+        const v = doc.data();
+        insertVen.run(
+          Number(v.id || doc.id),
+          v.nome,
+          Number(v.comissao_percentual || 0),
+          v.ativo !== undefined ? (v.ativo ? 1 : 0) : 1,
+          v.user_id ? Number(v.user_id) : null,
+          v.created_at || new Date().toISOString()
+        );
+      });
 
-    // Seed sample products
-    const insertProd = db.prepare(`
-      INSERT INTO produtos (nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    insertProd.run("100% Whey Protein Concentrado", "Max Titanium", "Proteínas", "Chocolate", "900g", "WHEY-MAX-01", "7891234567890", 65.00, 119.90, 18, 5, "", now, now);
-    insertProd.run("Creatina Monohidratada 100% Pura", "Creapure", "Creatinas", "Neutro", "300g", "CREAT-01", "7891234567891", 45.00, 89.90, 24, 6, "", now, now);
-    insertProd.run("Pré-Treino C4 Beta Pump", "New Millen", "Pré-treinos", "Frutas Vermelhas", "300g", "PRE-C4-01", "7891234567892", 52.00, 99.90, 12, 4, "", now, now);
-    insertProd.run("BCAA 2400", "Growth Supplements", "Aminoácidos", "Sem sabor", "120 cáps", "BCAA-120", "7891234567893", 28.00, 54.90, 3, 5, "", now, now); // Estoque baixo
-    insertProd.run("Multivitamínico Daily One", "Optimum Nutrition", "Vitaminas", "Tabletes", "90 tabs", "MULTI-01", "7891234567894", 38.00, 79.00, 15, 3, "", now, now);
-    insertProd.run("Pasta de Amendoim Integral", "Dr. Peanut", "Alimentos Fit", "Avelã", "600g", "PAST-01", "7891234567895", 22.00, 44.90, 20, 5, "", now, now);
-    insertProd.run("Coqueteleira Shaker Pro", "BlenderBottle", "Acessórios", "Preto Fosco", "700ml", "COQ-01", "7891234567896", 15.00, 39.90, 8, 4, "", now, now);
+      // 5. Produtos
+      const prodSnap = await firestore.collection("produtos").get();
+      const insertProd = db.prepare(`
+        INSERT OR REPLACE INTO produtos (id, nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      prodSnap.forEach((doc) => {
+        const p = doc.data();
+        insertProd.run(
+          Number(p.id || doc.id),
+          p.nome,
+          p.marca || "",
+          p.categoria || "",
+          p.sabor || "",
+          p.peso || "",
+          p.codigo_interno || "",
+          p.codigo_barras || "",
+          Number(p.custo || 0),
+          Number(p.venda || 0),
+          Number(p.estoque || 0),
+          Number(p.minimo || 5),
+          p.foto || "",
+          p.created_at || new Date().toISOString(),
+          p.updated_at || new Date().toISOString()
+        );
+      });
 
-    // Seed sample clients
-    const insertCli = db.prepare(`
-      INSERT INTO clientes (nome, telefone, whatsapp, created_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    insertCli.run("Rafael Mendes", "(11) 98765-4321", "(11) 98765-4321", now);
-    insertCli.run("Fernanda Souza", "(11) 97654-3210", "(11) 97654-3210", now);
-    insertCli.run("Bruno Henrique", "(11) 96543-2109", "(11) 96543-2109", now);
+      // 6. Clientes
+      const cliSnap = await firestore.collection("clientes").get();
+      const insertCli = db.prepare(`
+        INSERT OR REPLACE INTO clientes (id, nome, telefone, whatsapp, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      cliSnap.forEach((doc) => {
+        const c = doc.data();
+        insertCli.run(
+          Number(c.id || doc.id),
+          c.nome,
+          c.telefone || "",
+          c.whatsapp || "",
+          c.created_at || new Date().toISOString()
+        );
+      });
 
-    // Seed sample initial sales for current month and previous periods to demonstrate reports & filters
-    const d1 = new Date();
-    const dHoje = d1.toISOString();
-    
-    const dOntem = new Date(Date.now() - 86400000).toISOString();
-    const d3Dias = new Date(Date.now() - 3 * 86400000).toISOString();
-    const d7Dias = new Date(Date.now() - 7 * 86400000).toISOString();
-    const d15Dias = new Date(Date.now() - 15 * 86400000).toISOString();
-    const dPassado = new Date(Date.now() - 35 * 86400000).toISOString();
+      // 7. Vendas
+      const vendasSnap = await firestore.collection("vendas").get();
+      const insertVenda = db.prepare(`
+        INSERT OR REPLACE INTO vendas (id, data, cliente_id, vendedor_id, subtotal, desconto, total, lucro, forma_pagamento, data_prevista, user_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      vendasSnap.forEach((doc) => {
+        const v = doc.data();
+        insertVenda.run(
+          Number(v.id || doc.id),
+          v.data,
+          v.cliente_id ? Number(v.cliente_id) : null,
+          v.vendedor_id ? Number(v.vendedor_id) : null,
+          Number(v.subtotal || 0),
+          Number(v.desconto || 0),
+          Number(v.total || 0),
+          Number(v.lucro || 0),
+          v.forma_pagamento || "Dinheiro",
+          v.data_prevista || null,
+          v.user_id ? Number(v.user_id) : null,
+          v.created_at || v.data
+        );
+      });
 
-    const insertVenda = db.prepare(`
-      INSERT INTO vendas (data, cliente_id, vendedor_id, subtotal, desconto, total, lucro, forma_pagamento, data_prevista, user_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `);
-    const insertItem = db.prepare(`
-      INSERT INTO itens_venda (venda_id, produto_id, nome, qtd, preco_unit, custo_unit, subtotal)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+      // 8. Itens Venda
+      const itensSnap = await firestore.collection("itens_venda").get();
+      const insertItem = db.prepare(`
+        INSERT OR REPLACE INTO itens_venda (id, venda_id, produto_id, nome, qtd, preco_unit, custo_unit, subtotal)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      itensSnap.forEach((doc) => {
+        const it = doc.data();
+        insertItem.run(
+          Number(it.id || doc.id),
+          Number(it.venda_id),
+          Number(it.produto_id),
+          it.nome,
+          Number(it.qtd),
+          Number(it.preco_unit),
+          Number(it.custo_unit || 0),
+          Number(it.subtotal || 0)
+        );
+      });
 
-    // Sale 1: Hoje
-    insertVenda.run(dHoje, 1, 1, 209.80, 10.00, 199.80, 89.80, "PIX", null, dHoje);
-    insertItem.run(1, 1, "100% Whey Protein Concentrado", 1, 119.90, 65.00, 119.90);
-    insertItem.run(1, 2, "Creatina Monohidratada 100% Pura", 1, 89.90, 45.00, 89.90);
+      // 9. Devedores
+      const devSnap = await firestore.collection("devedores").get();
+      const insertDev = db.prepare(`
+        INSERT OR REPLACE INTO devedores (id, nome, telefone, cliente_id, data_prevista, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      devSnap.forEach((doc) => {
+        const d = doc.data();
+        insertDev.run(
+          Number(d.id || doc.id),
+          d.nome,
+          d.telefone || "",
+          d.cliente_id ? Number(d.cliente_id) : null,
+          d.data_prevista || null,
+          d.created_at || new Date().toISOString()
+        );
+      });
 
-    // Sale 2: Ontem
-    insertVenda.run(dOntem, 2, 2, 99.90, 0.00, 99.90, 47.90, "Cartão", null, dOntem);
-    insertItem.run(2, 3, "Pré-Treino C4 Beta Pump", 1, 99.90, 52.00, 99.90);
+      // 10. Movimentos Devedor
+      const movDevSnap = await firestore.collection("movimentos_devedor").get();
+      const insertMovDev = db.prepare(`
+        INSERT OR REPLACE INTO movimentos_devedor (id, devedor_id, tipo, valor, obs, data, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      movDevSnap.forEach((doc) => {
+        const m = doc.data();
+        insertMovDev.run(
+          Number(m.id || doc.id),
+          Number(m.devedor_id),
+          m.tipo,
+          Number(m.valor),
+          m.obs || "",
+          m.data,
+          m.user_id ? Number(m.user_id) : null
+        );
+      });
 
-    // Sale 3: 3 dias atrás
-    insertVenda.run(d3Dias, 3, 1, 123.90, 5.00, 118.90, 55.90, "Dinheiro", null, d3Dias);
-    insertItem.run(3, 5, "Multivitamínico Daily One", 1, 79.00, 38.00, 79.00);
-    insertItem.run(3, 6, "Pasta de Amendoim Integral", 1, 44.90, 22.00, 44.90);
+      // 11. Movimentações Estoque
+      const movSnap = await firestore.collection("movimentacoes").get();
+      const insertMov = db.prepare(`
+        INSERT OR REPLACE INTO movimentacoes (id, produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      movSnap.forEach((doc) => {
+        const m = doc.data();
+        insertMov.run(
+          Number(m.id || doc.id),
+          Number(m.produto_id),
+          m.tipo,
+          Number(m.qtd),
+          Number(m.qtd_anterior),
+          Number(m.qtd_nova),
+          Number(m.custo_unit || 0),
+          m.motivo || "",
+          m.data,
+          m.user_id ? Number(m.user_id) : null
+        );
+      });
 
-    // Sale 4: 7 dias atrás (Fiado)
-    insertVenda.run(d7Dias, 1, 2, 119.90, 0.00, 119.90, 54.90, "Fiado", new Date(Date.now() + 5*86400000).toISOString().slice(0, 10), d7Dias);
-    insertItem.run(4, 1, "100% Whey Protein Concentrado", 1, 119.90, 65.00, 119.90);
+      this.synced = true;
+      console.log("[Firestore Sync] Todos os dados em nuvem sincronizados com sucesso.");
+    } catch (e: any) {
+      console.error("[Firestore Sync] Erro na sincronização com a nuvem:", e.message || e);
+    }
+  }
 
-    // Create debtor entry for fiado sale
-    const insertDevedor = db.prepare(`
-      INSERT INTO devedores (nome, telefone, cliente_id, data_prevista, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    insertDevedor.run("Rafael Mendes", "(11) 98765-4321", 1, new Date(Date.now() + 5*86400000).toISOString().slice(0, 10), d7Dias);
-    const insertMovDev = db.prepare(`
-      INSERT INTO movimentos_devedor (devedor_id, tipo, valor, obs, data, user_id)
-      VALUES (?, 'divida', ?, 'Venda #4 (Fiado)', ?, 1)
-    `);
-    insertMovDev.run(1, 119.90, d7Dias);
+  // Cloud Write-Through helpers (writes to Firestore asynchronously to ensure durability)
+  static async saveConfig(key: string, value: string) {
+    try {
+      await firestore.collection("config").doc(key).set({ key, value });
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar config ${key}:`, e);
+    }
+  }
 
-    // Sale 5: 15 dias atrás
-    insertVenda.run(d15Dias, 2, 3, 179.80, 10.00, 169.80, 89.80, "Cartão", null, d15Dias);
-    insertItem.run(5, 2, "Creatina Monohidratada 100% Pura", 2, 89.90, 45.00, 179.80);
+  static async saveUser(user: any) {
+    try {
+      await firestore.collection("users").doc(String(user.id)).set(user);
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar user ${user.id}:`, e);
+    }
+  }
 
-    // Sale 6: Mês passado
-    insertVenda.run(dPassado, 3, 1, 119.90, 0.00, 119.90, 54.90, "PIX", null, dPassado);
-    insertItem.run(6, 1, "100% Whey Protein Concentrado", 1, 119.90, 65.00, 119.90);
+  static async deleteUser(id: number) {
+    try {
+      await firestore.collection("users").doc(String(id)).delete();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao deletar user ${id}:`, e);
+    }
+  }
+
+  static async saveSession(session: any) {
+    try {
+      await firestore.collection("sessions").doc(session.token).set(session);
+    } catch (e) {
+      console.error("[Firestore Sync] Erro ao salvar session:", e);
+    }
+  }
+
+  static async deleteSession(token: string) {
+    try {
+      await firestore.collection("sessions").doc(token).delete();
+    } catch (e) {
+      console.error("[Firestore Sync] Erro ao deletar session:", e);
+    }
+  }
+
+  static async saveProduto(produto: any) {
+    try {
+      await firestore.collection("produtos").doc(String(produto.id)).set(produto);
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar produto ${produto.id}:`, e);
+    }
+  }
+
+  static async deleteProduto(id: number) {
+    try {
+      await firestore.collection("produtos").doc(String(id)).delete();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao deletar produto ${id}:`, e);
+    }
+  }
+
+  static async saveCliente(cliente: any) {
+    try {
+      await firestore.collection("clientes").doc(String(cliente.id)).set(cliente);
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar cliente ${cliente.id}:`, e);
+    }
+  }
+
+  static async deleteCliente(id: number) {
+    try {
+      await firestore.collection("clientes").doc(String(id)).delete();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao deletar cliente ${id}:`, e);
+    }
+  }
+
+  static async saveVendedor(vendedor: any) {
+    try {
+      await firestore.collection("vendedores").doc(String(vendedor.id)).set(vendedor);
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar vendedor ${vendedor.id}:`, e);
+    }
+  }
+
+  static async deleteVendedor(id: number) {
+    try {
+      await firestore.collection("vendedores").doc(String(id)).delete();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao deletar vendedor ${id}:`, e);
+    }
+  }
+
+  static async saveVenda(venda: any, itens: any[], movimentacoes: any[], devedorData?: any) {
+    try {
+      const batch = firestore.batch();
+      // Venda
+      batch.set(firestore.collection("vendas").doc(String(venda.id)), venda);
+
+      // Itens
+      for (const item of itens) {
+        batch.set(firestore.collection("itens_venda").doc(String(item.id)), item);
+      }
+
+      // Movimentações estoque & atualização estoque produtos
+      for (const m of movimentacoes) {
+        batch.set(firestore.collection("movimentacoes").doc(String(m.id)), m);
+        batch.update(firestore.collection("produtos").doc(String(m.produto_id)), {
+          estoque: m.qtd_nova,
+          updated_at: m.data,
+        });
+      }
+
+      // Se fiado
+      if (devedorData) {
+        if (devedorData.isNew) {
+          batch.set(firestore.collection("devedores").doc(String(devedorData.devedor.id)), devedorData.devedor);
+        } else if (devedorData.data_prevista) {
+          batch.update(firestore.collection("devedores").doc(String(devedorData.devedor.id)), {
+            data_prevista: devedorData.data_prevista,
+          });
+        }
+        batch.set(firestore.collection("movimentos_devedor").doc(String(devedorData.movimento.id)), devedorData.movimento);
+      }
+
+      await batch.commit();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar venda ${venda.id} em nuvem:`, e);
+    }
+  }
+
+  static async cancelVenda(vendaId: number, restoredProducts: any[], restoredMovs: any[]) {
+    try {
+      const batch = firestore.batch();
+      batch.delete(firestore.collection("vendas").doc(String(vendaId)));
+
+      // Delete items
+      const itensSnap = await firestore.collection("itens_venda").where("venda_id", "==", vendaId).get();
+      itensSnap.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      // Restore stock
+      for (const p of restoredProducts) {
+        batch.update(firestore.collection("produtos").doc(String(p.id)), {
+          estoque: p.novoEstoque,
+          updated_at: new Date().toISOString(),
+        });
+      }
+
+      for (const m of restoredMovs) {
+        batch.set(firestore.collection("movimentacoes").doc(String(m.id)), m);
+      }
+
+      await batch.commit();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao cancelar venda ${vendaId} em nuvem:`, e);
+    }
+  }
+
+  static async saveMovimentacaoEstoque(mov: any, produtoId: number, novoEstoque: number, novoCusto: number) {
+    try {
+      const batch = firestore.batch();
+      batch.set(firestore.collection("movimentacoes").doc(String(mov.id)), mov);
+      batch.update(firestore.collection("produtos").doc(String(produtoId)), {
+        estoque: novoEstoque,
+        custo: novoCusto,
+        updated_at: mov.data,
+      });
+      await batch.commit();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar movimentacao de estoque em nuvem:`, e);
+    }
+  }
+
+  static async saveDevedor(devedor: any, movimentoInicial?: any) {
+    try {
+      const batch = firestore.batch();
+      batch.set(firestore.collection("devedores").doc(String(devedor.id)), devedor);
+      if (movimentoInicial) {
+        batch.set(firestore.collection("movimentos_devedor").doc(String(movimentoInicial.id)), movimentoInicial);
+      }
+      await batch.commit();
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar devedor em nuvem:`, e);
+    }
+  }
+
+  static async saveMovimentoDevedor(mov: any) {
+    try {
+      await firestore.collection("movimentos_devedor").doc(String(mov.id)).set(mov);
+    } catch (e) {
+      console.error(`[Firestore Sync] Erro ao salvar movimento devedor em nuvem:`, e);
+    }
+  }
+
+  static async restoreFullCloudBackup(backupData: any) {
+    try {
+      console.log("[Firestore Sync] Restaurando backup completo em nuvem...");
+      // Wipe collections
+      const collections = ["produtos", "clientes", "vendedores", "vendas", "itens_venda", "devedores", "movimentos_devedor", "movimentacoes"];
+      for (const col of collections) {
+        const snap = await firestore.collection(col).get();
+        const batch = firestore.batch();
+        snap.forEach((doc) => batch.delete(doc.ref));
+        await batch.commit();
+      }
+
+      // Re-populate produtos
+      if (Array.isArray(backupData.produtos)) {
+        for (const p of backupData.produtos) {
+          await firestore.collection("produtos").doc(String(p.id)).set(p);
+        }
+      }
+      // Re-populate clientes
+      if (Array.isArray(backupData.clientes)) {
+        for (const c of backupData.clientes) {
+          await firestore.collection("clientes").doc(String(c.id)).set(c);
+        }
+      }
+      // Re-populate vendedores
+      if (Array.isArray(backupData.vendedores)) {
+        for (const v of backupData.vendedores) {
+          await firestore.collection("vendedores").doc(String(v.id)).set(v);
+        }
+      }
+      // Re-populate vendas & itens
+      if (Array.isArray(backupData.vendas)) {
+        for (const v of backupData.vendas) {
+          await firestore.collection("vendas").doc(String(v.id)).set(v);
+        }
+      }
+      if (Array.isArray(backupData.itens_venda)) {
+        for (const it of backupData.itens_venda) {
+          await firestore.collection("itens_venda").doc(String(it.id)).set(it);
+        }
+      }
+      // Re-populate devedores & movimentos
+      if (Array.isArray(backupData.devedores)) {
+        for (const d of backupData.devedores) {
+          await firestore.collection("devedores").doc(String(d.id)).set(d);
+        }
+      }
+      if (Array.isArray(backupData.movimentos_devedor)) {
+        for (const m of backupData.movimentos_devedor) {
+          await firestore.collection("movimentos_devedor").doc(String(m.id)).set(m);
+        }
+      }
+      console.log("[Firestore Sync] Restauração completa do backup em nuvem finalizada.");
+    } catch (e) {
+      console.error("[Firestore Sync] Erro ao restaurar backup completo em nuvem:", e);
+    }
   }
 }
