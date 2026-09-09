@@ -155,6 +155,153 @@ export function initDatabase() {
       FOREIGN KEY (devedor_id) REFERENCES devedores(id) ON DELETE CASCADE
     );
   `);
+
+  // Migrate users table with comissao_percentual if not exists
+  try {
+    db.exec("ALTER TABLE users ADD COLUMN comissao_percentual REAL DEFAULT 5");
+  } catch (e) {
+    // Column already exists
+  }
+
+  // Ensure default users exist in local cache immediately
+  seedDefaultUsersIfMissing();
+  syncVendedoresWithUsers();
+}
+
+export function syncVendedoresWithUsers(): void {
+  try {
+    const vendedoresUsers = db.prepare("SELECT * FROM users WHERE role IN ('vendedor', 'caixa')").all() as any[];
+    const now = new Date().toISOString();
+
+    for (const u of vendedoresUsers) {
+      const existing = db.prepare("SELECT * FROM vendedores WHERE user_id = ? OR LOWER(nome) = LOWER(?)").get(u.id, u.nome.trim()) as any;
+      const comissao = u.comissao_percentual !== undefined && u.comissao_percentual !== null ? Number(u.comissao_percentual) : (existing?.comissao_percentual ?? 5);
+
+      if (existing) {
+        db.prepare(`
+          UPDATE vendedores
+          SET nome = ?, comissao_percentual = ?, ativo = ?, user_id = ?
+          WHERE id = ?
+        `).run(u.nome.trim(), comissao, u.ativo ? 1 : 0, u.id, existing.id);
+
+        FirestoreSyncService.saveVendedor({
+          id: existing.id,
+          nome: u.nome.trim(),
+          comissao_percentual: comissao,
+          ativo: u.ativo ? 1 : 0,
+          user_id: u.id,
+          created_at: existing.created_at || now,
+        });
+      } else {
+        const maxIdRow = db.prepare("SELECT MAX(id) as maxId FROM vendedores").get() as any;
+        const newId = (maxIdRow?.maxId || 0) + 1;
+
+        db.prepare(`
+          INSERT INTO vendedores (id, nome, comissao_percentual, ativo, user_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).run(newId, u.nome.trim(), comissao, u.ativo ? 1 : 0, u.id, u.created_at || now);
+
+        FirestoreSyncService.saveVendedor({
+          id: newId,
+          nome: u.nome.trim(),
+          comissao_percentual: comissao,
+          ativo: u.ativo ? 1 : 0,
+          user_id: u.id,
+          created_at: u.created_at || now,
+        });
+      }
+    }
+
+    // Deactivate vendedores whose user is no longer a vendedor/caixa
+    const nonVendUsers = db.prepare("SELECT id FROM users WHERE role NOT IN ('vendedor', 'caixa')").all() as any[];
+    for (const nu of nonVendUsers) {
+      db.prepare("UPDATE vendedores SET ativo = 0 WHERE user_id = ?").run(nu.id);
+    }
+  } catch (err: any) {
+    console.error("[Sync Vendedores] Erro ao sincronizar vendedores com usuários:", err.message || err);
+  }
+}
+
+export function seedDefaultUsersIfMissing(): void {
+  try {
+    const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as any;
+    if (!userCount || userCount.count === 0) {
+      console.log("[Local DB] Semeando usuários padrão no SQLite...");
+      const now = new Date().toISOString();
+      const insertUser = db.prepare(`
+        INSERT OR REPLACE INTO users (id, username, nome, email, password_hash, salt, role, ativo, comissao_percentual, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const adminPass = hashPassword("admin123");
+      insertUser.run(1, "admin", "Administrador do Sistema", "admin@loja.com", adminPass.hash, adminPass.salt, "admin", 1, 0, now);
+
+      const vendPass = hashPassword("vendedor123");
+      insertUser.run(2, "vendedor", "Carlos Silva (Vendedor & Caixa)", "vendedor@loja.com", vendPass.hash, vendPass.salt, "vendedor", 1, 5, now);
+
+      const gerPass = hashPassword("gerente123");
+      insertUser.run(3, "gerente", "Gerente Geral", "gerente@loja.com", gerPass.hash, gerPass.salt, "gerente", 1, 0, now);
+
+      syncVendedoresWithUsers();
+    }
+  } catch (err: any) {
+    console.error("[Local DB] Erro ao verificar/semear usuários padrão:", err.message || err);
+  }
+}
+
+export function resetDefaultUsers(): void {
+  const now = new Date().toISOString();
+  const insertUser = db.prepare(`
+    INSERT OR REPLACE INTO users (id, username, nome, email, password_hash, salt, role, ativo, comissao_percentual, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const adminPass = hashPassword("admin123");
+  insertUser.run(1, "admin", "Administrador do Sistema", "admin@loja.com", adminPass.hash, adminPass.salt, "admin", 1, 0, now);
+  FirestoreSyncService.saveUser({
+    id: 1,
+    username: "admin",
+    nome: "Administrador do Sistema",
+    email: "admin@loja.com",
+    password_hash: adminPass.hash,
+    salt: adminPass.salt,
+    role: "admin",
+    ativo: 1,
+    comissao_percentual: 0,
+    created_at: now,
+  });
+
+  const vendPass = hashPassword("vendedor123");
+  insertUser.run(2, "vendedor", "Carlos Silva (Vendedor & Caixa)", "vendedor@loja.com", vendPass.hash, vendPass.salt, "vendedor", 1, 5, now);
+  FirestoreSyncService.saveUser({
+    id: 2,
+    username: "vendedor",
+    nome: "Carlos Silva (Vendedor & Caixa)",
+    email: "vendedor@loja.com",
+    password_hash: vendPass.hash,
+    salt: vendPass.salt,
+    role: "vendedor",
+    ativo: 1,
+    comissao_percentual: 5,
+    created_at: now,
+  });
+
+  const gerPass = hashPassword("gerente123");
+  insertUser.run(3, "gerente", "Gerente Geral", "gerente@loja.com", gerPass.hash, gerPass.salt, "gerente", 1, 0, now);
+  FirestoreSyncService.saveUser({
+    id: 3,
+    username: "gerente",
+    nome: "Gerente Geral",
+    email: "gerente@loja.com",
+    password_hash: gerPass.hash,
+    salt: gerPass.salt,
+    role: "gerente",
+    ativo: 1,
+    comissao_percentual: 0,
+    created_at: now,
+  });
+
+  syncVendedoresWithUsers();
 }
 
 // Real-time synchronization layer with Cloud Firestore
@@ -375,8 +522,74 @@ export class FirestoreSyncService {
 
       this.synced = true;
       console.log("[Firestore Sync] Todos os dados em nuvem sincronizados com sucesso.");
+
+      // Start continuous real-time listeners on server as well
+      this.startRealtimeListeners();
     } catch (e: any) {
       console.error("[Firestore Sync] Erro na sincronização com a nuvem:", e.message || e);
+    }
+  }
+
+  // Server-side continuous listeners to keep SQLite cache synchronized with cloud changes
+  static startRealtimeListeners() {
+    try {
+      firestore.collection("produtos").onSnapshot((snapshot) => {
+        const insertProd = db.prepare(`
+          INSERT OR REPLACE INTO produtos (id, nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === "removed") {
+            const id = Number(change.doc.data().id || change.doc.id);
+            db.prepare("DELETE FROM produtos WHERE id = ?").run(id);
+          } else {
+            const p = change.doc.data();
+            insertProd.run(
+              Number(p.id || change.doc.id),
+              p.nome || "",
+              p.marca || "",
+              p.categoria || "",
+              p.sabor || "",
+              p.peso || "",
+              p.codigo_interno || "",
+              p.codigo_barras || "",
+              Number(p.custo || 0),
+              Number(p.venda || 0),
+              Number(p.estoque || 0),
+              Number(p.minimo || 5),
+              p.foto || "",
+              p.created_at || new Date().toISOString(),
+              p.updated_at || new Date().toISOString()
+            );
+          }
+        });
+      });
+
+      firestore.collection("movimentacoes").onSnapshot((snapshot) => {
+        const insertMov = db.prepare(`
+          INSERT OR REPLACE INTO movimentacoes (id, produto_id, tipo, qtd, qtd_anterior, qtd_nova, custo_unit, motivo, data, user_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        snapshot.docChanges().forEach((change) => {
+          if (change.type !== "removed") {
+            const m = change.doc.data();
+            insertMov.run(
+              Number(m.id || change.doc.id),
+              Number(m.produto_id),
+              m.tipo || "ajuste",
+              Number(m.qtd || 0),
+              Number(m.qtd_anterior || 0),
+              Number(m.qtd_nova || 0),
+              Number(m.custo_unit || 0),
+              m.motivo || "",
+              m.data || new Date().toISOString(),
+              m.user_id ? Number(m.user_id) : null
+            );
+          }
+        });
+      });
+    } catch (err: any) {
+      console.warn("[Firestore Realtime Server] Erro ao iniciar listeners:", err.message || err);
     }
   }
 

@@ -1,5 +1,13 @@
 // AppVenda - Client Engine
 // Connects UI to secure Express/SQLite API with RBAC, period filters, and monthly performance reports.
+import * as XLSX from "xlsx";
+import {
+  subscribeToProducts,
+  subscribeToInventoryMovements,
+  onRealtimeStatusChange,
+  ProductItem,
+  InventoryMovementItem,
+} from "./firebase-client";
 
 declare const bootstrap: any;
 declare const Chart: any;
@@ -14,14 +22,20 @@ interface CurrentUser {
 }
 
 let currentUser: CurrentUser | null = null;
-let policies = { ocultarVendasVendedor: true };
+let policies = { ocultarVendasVendedor: false };
 let produtos: any[] = [];
+let produtosImportacaoExcel: any[] = [];
+let movimentacoes: any[] = [];
 let clientes: any[] = [];
 let vendedores: any[] = [];
 let devedores: any[] = [];
 let carrinho: any[] = [];
 let filtroPendentes = false;
 let relatorioAtivo = "mensal";
+
+// Realtime subscriptions
+let unsubscribeProducts: (() => void) | null = null;
+let unsubscribeInventory: (() => void) | null = null;
 
 // Chart instances to prevent canvas reuse errors
 let chartVendasMesInstance: any = null;
@@ -151,9 +165,12 @@ async function verificarSessao() {
   try {
     const res = await apiFetch("/api/auth/me");
     currentUser = res.user;
-    policies = res.policies || { ocultarVendasVendedor: true };
+    policies = res.policies || { ocultarVendasVendedor: false };
     aplicarPerfilUsuario();
     carregarTudo();
+    if (currentUser?.role === "vendedor" || currentUser?.role === "caixa") {
+      navegarParaTab("vendas");
+    }
   } catch (err) {
     mostrarModalLogin();
   }
@@ -181,12 +198,15 @@ async function executarLogin(e: Event) {
 
     localStorage.setItem(TOKEN_KEY, res.token);
     currentUser = res.user;
-    policies = res.policies || { ocultarVendasVendedor: true };
+    policies = res.policies || { ocultarVendasVendedor: false };
 
     esconderModalLogin();
     toast(`Bem-vindo, ${currentUser?.nome}!`, "success");
     aplicarPerfilUsuario();
     carregarTudo();
+    if (currentUser?.role === "vendedor" || currentUser?.role === "caixa") {
+      navegarParaTab("vendas");
+    }
   } catch (err: any) {
     toast(err.message || "Falha no login", "error");
   } finally {
@@ -196,11 +216,57 @@ async function executarLogin(e: Event) {
 }
 
 function preencherLogin(u: string, p: string) {
-  (document.getElementById("loginIdentifier") as HTMLInputElement).value = u;
-  (document.getElementById("loginPassword") as HTMLInputElement).value = p;
+  const uEl = document.getElementById("loginIdentifier") as HTMLInputElement;
+  const pEl = document.getElementById("loginPassword") as HTMLInputElement;
+  if (uEl) uEl.value = u;
+  if (pEl) pEl.value = p;
+}
+
+function preencherELogar(u: string, p: string) {
+  preencherLogin(u, p);
+  const btn = document.getElementById("btnLoginSubmit") as HTMLButtonElement;
+  if (btn) btn.click();
+}
+
+function toggleMostrarSenhaLogin() {
+  const pEl = document.getElementById("loginPassword") as HTMLInputElement;
+  const icon = document.getElementById("iconOlhoSenha");
+  const btnIcon = document.getElementById("btnEyeIcon");
+  const text = document.getElementById("textOlhoSenha");
+  if (!pEl) return;
+
+  if (pEl.type === "password") {
+    pEl.type = "text";
+    if (icon) icon.className = "fa-solid fa-eye-slash";
+    if (btnIcon) btnIcon.className = "fa-solid fa-eye-slash";
+    if (text) text.textContent = "Ocultar";
+  } else {
+    pEl.type = "password";
+    if (icon) icon.className = "fa-solid fa-eye";
+    if (btnIcon) btnIcon.className = "fa-solid fa-eye";
+    if (text) text.textContent = "Mostrar";
+  }
+}
+
+async function restaurarCredenciaisPadrao() {
+  try {
+    const res = await apiFetch("/api/auth/reset-defaults", { method: "POST" });
+    toast(res.message || "Credenciais padrão restauradas!", "success");
+    preencherLogin("admin", "admin123");
+  } catch (err: any) {
+    toast(err.message || "Erro ao restaurar credenciais", "error");
+  }
 }
 
 async function logoutUsuario() {
+  if (unsubscribeProducts) {
+    unsubscribeProducts();
+    unsubscribeProducts = null;
+  }
+  if (unsubscribeInventory) {
+    unsubscribeInventory();
+    unsubscribeInventory = null;
+  }
   try {
     await apiFetch("/api/auth/logout", { method: "POST" });
   } catch (e) {}
@@ -253,27 +319,19 @@ function aplicarPerfilUsuario() {
     roleEl.className = `badge-role role-${role}`;
   }
 
-  // REQUISITO CRUCIAL: "oculta a tela de venda para vendedor"
+  // Vendedor e Operador de Caixa têm acesso completo ao PDV de Vendas
   const navVendas = document.getElementById("nav-vendas");
   const bannerVendedor = document.getElementById("bannerVendedorOculto");
-  const deveOcultarVendas = isVendedor && policies.ocultarVendasVendedor;
 
   if (navVendas) {
-    navVendas.style.display = deveOcultarVendas ? "none" : "flex";
-  }
-
-  // Se o usuário logado for vendedor e a tela de vendas estiver oculta,
-  // garantir que ele não fique na aba de vendas
-  const linkAtivo = document.querySelector(".sidebar .nav-link.active") as HTMLElement;
-  if (deveOcultarVendas && linkAtivo && linkAtivo.dataset.tab === "vendas") {
-    navegarParaTab("produtos");
+    navVendas.style.display = "flex";
   }
 
   if (bannerVendedor) {
-    bannerVendedor.classList.toggle("d-none", !deveOcultarVendas);
+    bannerVendedor.classList.add("d-none");
   }
 
-  // Controle de visibilidade das demais abas para papéis restritos
+  // Controle de visibilidade das abas para papéis
   const navDashboard = document.getElementById("nav-dashboard");
   const navEstoque = document.getElementById("nav-estoque");
   const navDevedores = document.getElementById("nav-devedores");
@@ -283,27 +341,20 @@ function aplicarPerfilUsuario() {
   const navConfig = document.getElementById("nav-config");
   const adminDivider = document.getElementById("adminDivider");
 
-  if (isVendedor) {
+  if (isVendedor || role === "caixa") {
     if (navDashboard) navDashboard.style.display = "none";
     if (navEstoque) navEstoque.style.display = "none";
-    if (navDevedores) navDevedores.style.display = "none";
-    if (navRelatorios) navRelatorios.style.display = "none";
-    if (navUsuarios) navUsuarios.style.display = "none";
-    if (navConfig) navConfig.style.display = "none";
-    if (adminDivider) adminDivider.style.display = "none";
-    if (navComissoes) navComissoes.style.display = "flex";
-  } else if (role === "caixa") {
-    if (navDashboard) navDashboard.style.display = "none";
-    if (navEstoque) navEstoque.style.display = "none";
+    if (navVendas) navVendas.style.display = "flex";
     if (navDevedores) navDevedores.style.display = "flex";
     if (navRelatorios) navRelatorios.style.display = "none";
     if (navUsuarios) navUsuarios.style.display = "none";
     if (navConfig) navConfig.style.display = "none";
     if (adminDivider) adminDivider.style.display = "none";
-    if (navComissoes) navComissoes.style.display = "none";
+    if (navComissoes) navComissoes.style.display = "none"; // Sem tela de comissões para vendedor
   } else if (isGerente) {
     if (navDashboard) navDashboard.style.display = "flex";
     if (navEstoque) navEstoque.style.display = "flex";
+    if (navVendas) navVendas.style.display = "flex";
     if (navDevedores) navDevedores.style.display = "flex";
     if (navRelatorios) navRelatorios.style.display = "flex";
     if (navComissoes) navComissoes.style.display = "flex";
@@ -313,6 +364,7 @@ function aplicarPerfilUsuario() {
   } else if (isAdmin) {
     if (navDashboard) navDashboard.style.display = "flex";
     if (navEstoque) navEstoque.style.display = "flex";
+    if (navVendas) navVendas.style.display = "flex";
     if (navDevedores) navDevedores.style.display = "flex";
     if (navRelatorios) navRelatorios.style.display = "flex";
     if (navComissoes) navComissoes.style.display = "flex";
@@ -321,12 +373,10 @@ function aplicarPerfilUsuario() {
     if (adminDivider) adminDivider.style.display = "block";
   }
 
-  // Redireciona caso a aba ativa esteja oculta para o perfil atual
+  // Redireciona caso a aba ativa esteja oculta para o perfil atual ou seja dashboard para vendedor
   const tabAtivaAtual = document.querySelector(".sidebar .nav-link.active") as HTMLElement;
-  if (tabAtivaAtual && (tabAtivaAtual.style.display === "none" || (tabAtivaAtual.dataset.tab === "vendas" && deveOcultarVendas))) {
-    if (isVendedor) {
-      navegarParaTab("produtos");
-    } else if (role === "caixa") {
+  if (!tabAtivaAtual || tabAtivaAtual.style.display === "none" || ((isVendedor || role === "caixa") && tabAtivaAtual.dataset.tab === "dashboard")) {
+    if (isVendedor || role === "caixa") {
       navegarParaTab("vendas");
     } else {
       navegarParaTab("dashboard");
@@ -339,10 +389,9 @@ function aplicarPerfilUsuario() {
 /* ========================================================================== */
 
 function navegarParaTab(tabName: string) {
-  const isVendedor = currentUser?.role === "vendedor";
-  if (tabName === "vendas" && isVendedor && policies.ocultarVendasVendedor) {
-    toast("A tela de vendas está oculta para o perfil Vendedor.", "warning");
-    tabName = "produtos";
+  const isVendedor = currentUser?.role === "vendedor" || currentUser?.role === "caixa";
+  if (tabName === "comissoes" && isVendedor) {
+    tabName = "vendas";
   }
 
   document.querySelectorAll(".sidebar .nav-link").forEach((l) => l.classList.remove("active"));
@@ -435,11 +484,82 @@ function carregarAba(tab: string) {
   }
 }
 
+function iniciarSincronizacaoTempoReal() {
+  if (unsubscribeProducts) unsubscribeProducts();
+  if (unsubscribeInventory) unsubscribeInventory();
+
+  // 1. Real-time Product Catalog Listener
+  unsubscribeProducts = subscribeToProducts(
+    (novosProdutos) => {
+      produtos = novosProdutos;
+      atualizarCategoriasSelect();
+      renderProdutosFiltrados();
+      popularSelectProdutosEstoque();
+      renderEstoqueVisao();
+
+      // Update Dashboard live counts
+      const dQtd = document.getElementById("dQtdProdutos");
+      if (dQtd) dQtd.textContent = String(produtos.length);
+      const dEstoque = document.getElementById("dValorEstoque");
+      if (dEstoque) {
+        const valorTotal = produtos.reduce((s, p) => s + p.estoque * p.custo, 0);
+        dEstoque.textContent = brl(valorTotal);
+      }
+      const dBaixo = document.getElementById("dEstoqueBaixo");
+      if (dBaixo) {
+        const baixos = produtos.filter((p) => p.estoque <= p.minimo).length;
+        dBaixo.textContent = String(baixos);
+      }
+
+      // Update active cart item maximums if any
+      carrinho.forEach((item) => {
+        const prodAtual = produtos.find((p) => p.id === item.id);
+        if (prodAtual) {
+          item.estoqueMax = prodAtual.estoque;
+        }
+      });
+    },
+    (err) => {
+      console.warn("[Realtime Client] Falha no listener de produtos, usando API fallback:", err);
+    }
+  );
+
+  // 2. Real-time Inventory Movements Listener
+  unsubscribeInventory = subscribeToInventoryMovements(
+    (novasMovimentacoes) => {
+      movimentacoes = novasMovimentacoes;
+      renderHistoricoEstoqueFromList(novasMovimentacoes);
+    },
+    (err) => {
+      console.warn("[Realtime Client] Falha no listener de estoque, usando API fallback:", err);
+    }
+  );
+}
+
+// Global connection badge updater
+onRealtimeStatusChange((status, message) => {
+  const badge = document.getElementById("topbarSyncBadge");
+  const text = document.getElementById("topbarSyncText");
+  if (!badge || !text) return;
+
+  if (status === "connected") {
+    badge.className = "badge bg-success-subtle text-success border border-success-subtle d-inline-flex align-items-center gap-1";
+    text.textContent = "Firestore Tempo Real Ativo";
+  } else if (status === "syncing") {
+    badge.className = "badge bg-warning-subtle text-warning border border-warning-subtle d-inline-flex align-items-center gap-1";
+    text.textContent = "Sincronizando...";
+  } else if (status === "error") {
+    badge.className = "badge bg-danger-subtle text-danger border border-danger-subtle d-inline-flex align-items-center gap-1";
+    text.textContent = "Reconectando Firestore...";
+  }
+});
+
 function carregarTudo() {
   carregarConfig();
   carregarProdutos();
   carregarClientes();
   carregarVendedores();
+  iniciarSincronizacaoTempoReal();
 
   const linkAtivo = document.querySelector(".sidebar .nav-link.active") as HTMLElement;
   const tabAtual = linkAtivo ? linkAtivo.dataset.tab : "dashboard";
@@ -587,7 +707,7 @@ function renderProdutosFiltrados() {
   const cat = (document.getElementById("filtroCategoriaProduto") as HTMLSelectElement)?.value || "";
 
   const lista = produtos.filter((p) => {
-    const matchTermo = !termo || `${p.nome} ${p.marca} ${p.categoria} ${p.codigo_barras || ""}`.toLowerCase().includes(termo);
+    const matchTermo = !termo || `${p.nome} ${p.marca || ""} ${p.categoria || ""} ${p.codigo_interno || ""} ${p.codigo_barras || ""}`.toLowerCase().includes(termo);
     const matchCat = !cat || p.categoria === cat;
     return matchTermo && matchCat;
   });
@@ -606,6 +726,8 @@ function renderProdutosFiltrados() {
     if (p.estoque <= 0) badgeEstoque = `<span class="badge-status-out">Esgotado (0)</span>`;
     else if (p.estoque <= p.minimo) badgeEstoque = `<span class="badge-status-low">Baixo (${p.estoque})</span>`;
 
+    const codigoExibicao = p.codigo_barras ? `EAN: ${p.codigo_barras}` : (p.codigo_interno ? `Cód: ${p.codigo_interno}` : "-");
+
     return `
       <tr>
         <td>
@@ -613,11 +735,10 @@ function renderProdutosFiltrados() {
         </td>
         <td>
           <div class="fw-bold">${p.nome}</div>
-          <small class="text-muted">${p.codigo_barras ? 'EAN: ' + p.codigo_barras : ''}</small>
         </td>
         <td>${p.marca || "-"}</td>
         <td><span class="badge bg-surface2 border border-line text-muted">${p.categoria || "Geral"}</span></td>
-        <td>${[p.sabor, p.peso].filter(Boolean).join(" / ") || "-"}</td>
+        <td><small class="text-muted">${codigoExibicao}</small></td>
         <td class="text-end">${brl(p.custo)}</td>
         <td class="text-end fw-bold" style="color:var(--accent);">${brl(p.venda)}</td>
         <td class="text-end">${margem.toFixed(1)}%</td>
@@ -644,8 +765,6 @@ function openProdutoModal(id?: number) {
     (document.getElementById("prodNome") as HTMLInputElement).value = p.nome || "";
     (document.getElementById("prodMarca") as HTMLInputElement).value = p.marca || "";
     (document.getElementById("prodCategoria") as HTMLInputElement).value = p.categoria || "";
-    (document.getElementById("prodSabor") as HTMLInputElement).value = p.sabor || "";
-    (document.getElementById("prodPeso") as HTMLInputElement).value = p.peso || "";
     (document.getElementById("prodCodigoInterno") as HTMLInputElement).value = p.codigo_interno || "";
     (document.getElementById("prodCodigoBarras") as HTMLInputElement).value = p.codigo_barras || "";
     (document.getElementById("prodFoto") as HTMLInputElement).value = p.foto || "";
@@ -659,8 +778,9 @@ function openProdutoModal(id?: number) {
     (document.getElementById("prodId") as HTMLInputElement).value = "";
     (document.getElementById("prodFoto") as HTMLInputElement).value = "";
     setFotoPreview(null);
-    ["prodNome", "prodMarca", "prodCategoria", "prodSabor", "prodPeso", "prodCodigoInterno", "prodCodigoBarras"].forEach((f) => {
-      (document.getElementById(f) as HTMLInputElement).value = "";
+    ["prodNome", "prodMarca", "prodCategoria", "prodCodigoInterno", "prodCodigoBarras"].forEach((f) => {
+      const el = document.getElementById(f) as HTMLInputElement;
+      if (el) el.value = "";
     });
     (document.getElementById("prodCusto") as HTMLInputElement).value = "0";
     (document.getElementById("prodVenda") as HTMLInputElement).value = "0";
@@ -687,8 +807,8 @@ async function salvarProduto() {
     nome,
     marca: (document.getElementById("prodMarca") as HTMLInputElement).value.trim(),
     categoria: (document.getElementById("prodCategoria") as HTMLInputElement).value.trim(),
-    sabor: (document.getElementById("prodSabor") as HTMLInputElement).value.trim(),
-    peso: (document.getElementById("prodPeso") as HTMLInputElement).value.trim(),
+    sabor: "",
+    peso: "",
     codigo_interno: (document.getElementById("prodCodigoInterno") as HTMLInputElement).value.trim(),
     codigo_barras: (document.getElementById("prodCodigoBarras") as HTMLInputElement).value.trim(),
     foto: (document.getElementById("prodFoto") as HTMLInputElement).value || "",
@@ -710,6 +830,580 @@ async function salvarProduto() {
     carregarProdutos();
   } catch (err: any) {
     toast(err.message, "error");
+  }
+}
+
+/* ========================================================================== */
+/*                   IMPORTAÇÃO DE PRODUTOS VIA EXCEL (.XLSX)                 */
+/* ========================================================================== */
+
+function openImportarExcelModal() {
+  produtosImportacaoExcel = [];
+  const fileInput = document.getElementById("inputArquivoExcel") as HTMLInputElement;
+  if (fileInput) fileInput.value = "";
+  
+  const areaPreview = document.getElementById("areaPreviewExcel");
+  if (areaPreview) areaPreview.style.display = "none";
+
+  const btnConfirmar = document.getElementById("btnConfirmarImportacaoExcel") as HTMLButtonElement;
+  if (btnConfirmar) {
+    btnConfirmar.disabled = true;
+    btnConfirmar.innerHTML = `<i class="fa-solid fa-cloud-arrow-up me-1"></i> Confirmar e Salvar Produtos`;
+  }
+
+  bootstrap.Modal.getOrCreateInstance(document.getElementById("modalImportarExcel")).show();
+}
+
+function normalizeExcelKey(str: any): string {
+  return String(str || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove accents
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, ""); // remove spaces, punctuation, symbols
+}
+
+function parseExcelValueString(val: any): string {
+  if (val === undefined || val === null) return "";
+  if (typeof val === "number") {
+    if (Number.isInteger(val)) return val.toFixed(0);
+    return String(val);
+  }
+  return String(val).trim();
+}
+
+function parseExcelValueNumber(val: any, def: number = 0): number {
+  if (val === undefined || val === null || val === "") return def;
+  if (typeof val === "number") return isNaN(val) ? def : val;
+  let str = String(val).trim();
+  str = str.replace(/R\$/gi, "").replace(/\$/g, "").replace(/\s/g, "");
+  if (str.includes(",") && str.includes(".")) {
+    str = str.replace(/\./g, "").replace(",", ".");
+  } else if (str.includes(",")) {
+    str = str.replace(",", ".");
+  }
+  const num = parseFloat(str);
+  return isNaN(num) ? def : num;
+}
+
+function getFieldMapping(headerText: string): string | null {
+  const k = normalizeExcelKey(headerText);
+  if (!k) return null;
+
+  // Código de Barras (EAN / GTIN / Barcode)
+  if (
+    k === "codigodebarras" ||
+    k === "codigobarras" ||
+    k === "codbarras" ||
+    k === "barras" ||
+    k === "ean" ||
+    k === "ean13" ||
+    k === "gtin" ||
+    k === "upc" ||
+    k === "barcode" ||
+    k.includes("codigodebarra") ||
+    k.includes("codbarras") ||
+    k.includes("ean")
+  ) {
+    return "codigo_barras";
+  }
+
+  // Código Interno / SKU / Referência
+  if (
+    k === "codigointerno" ||
+    k === "codinterno" ||
+    k === "sku" ||
+    k === "referencia" ||
+    k === "ref" ||
+    k === "codigo" ||
+    k === "cod" ||
+    k === "idproduto" ||
+    k.includes("codigointerno") ||
+    k.includes("codinterno") ||
+    k.includes("sku") ||
+    k.includes("referencia") ||
+    (k.startsWith("cod") && !k.includes("barra"))
+  ) {
+    return "codigo_interno";
+  }
+
+  // Preço de Custo
+  if (
+    k === "custo" ||
+    k === "precodecusto" ||
+    k === "precocusto" ||
+    k === "valordecusto" ||
+    k === "valorcusto" ||
+    k === "precocompra" ||
+    k === "custounitario" ||
+    k === "cost" ||
+    k === "buyprice" ||
+    k.includes("custo") ||
+    k.includes("compra")
+  ) {
+    return "custo";
+  }
+
+  // Preço de Venda
+  if (
+    k === "venda" ||
+    k === "precodevenda" ||
+    k === "precovenda" ||
+    k === "valordevenda" ||
+    k === "valorvenda" ||
+    k === "preco" ||
+    k === "valor" ||
+    k === "precounitario" ||
+    k === "price" ||
+    k === "sellprice" ||
+    k === "pvp" ||
+    k === "precoconsumidor" ||
+    k.includes("precodevenda") ||
+    k.includes("precovenda") ||
+    k.includes("venda") ||
+    k.includes("preco") ||
+    k.includes("valor")
+  ) {
+    return "venda";
+  }
+
+  // Estoque Atual / Quantidade
+  if (
+    k === "estoque" ||
+    k === "estoqueatual" ||
+    k === "estoquefisico" ||
+    k === "estoquedisponivel" ||
+    k === "quantidade" ||
+    k === "qtd" ||
+    k === "quant" ||
+    k === "qnt" ||
+    k === "saldo" ||
+    k === "stock" ||
+    k === "quantity" ||
+    k === "qty" ||
+    k === "unidades" ||
+    k.includes("estoqueatual") ||
+    k.includes("quantidade") ||
+    k.includes("estoque")
+  ) {
+    return "estoque";
+  }
+
+  // Estoque Mínimo
+  if (
+    k === "minimo" ||
+    k === "estoqueminimo" ||
+    k === "qtdminima" ||
+    k === "quantidademinima" ||
+    k === "min" ||
+    k === "minstock" ||
+    k.includes("minimo") ||
+    k.includes("minima")
+  ) {
+    return "minimo";
+  }
+
+  // Marca / Fabricante
+  if (
+    k === "marca" ||
+    k === "marcadoproduto" ||
+    k === "brand" ||
+    k === "fabricante" ||
+    k === "laboratorio" ||
+    k === "fornecedor" ||
+    k.includes("marca") ||
+    k.includes("fabricante")
+  ) {
+    return "marca";
+  }
+
+  // Categoria / Grupo / Departamento
+  if (
+    k === "categoria" ||
+    k === "categoriadoproduto" ||
+    k === "category" ||
+    k === "grupo" ||
+    k === "departamento" ||
+    k === "secao" ||
+    k === "linha" ||
+    k === "tipo" ||
+    k === "classe" ||
+    k === "familia" ||
+    k.includes("categoria") ||
+    k.includes("departamento")
+  ) {
+    return "categoria";
+  }
+
+  // Nome do produto / Descrição / Item
+  if (
+    k === "nome" ||
+    k === "nomedoproduto" ||
+    k === "nomeproduto" ||
+    k === "produto" ||
+    k === "produtos" ||
+    k === "descricao" ||
+    k === "descricaodoproduto" ||
+    k === "descricaoproduto" ||
+    k === "desc" ||
+    k === "item" ||
+    k === "itens" ||
+    k === "titulo" ||
+    k === "artigo" ||
+    k === "mercadoria" ||
+    k === "product" ||
+    k === "productname" ||
+    k === "description" ||
+    k === "especificacao" ||
+    k === "especificacaodoproduto" ||
+    k === "detalhe" ||
+    k === "designacao" ||
+    k.includes("nomedoprod") ||
+    k.includes("descricaodoprod") ||
+    k.includes("nome") ||
+    k.includes("prod") ||
+    k.includes("desc")
+  ) {
+    return "nome";
+  }
+
+  return null;
+}
+
+function handleExcelFileUpload(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e: any) => {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const workbook = XLSX.read(data, { type: "array" });
+
+      const firstSheetName = workbook.SheetNames[0];
+      if (!firstSheetName) {
+        toast("Nenhuma planilha encontrada no arquivo.", "error");
+        return;
+      }
+
+      const worksheet = workbook.Sheets[firstSheetName];
+      const sheetData: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" });
+
+      if (!sheetData || sheetData.length === 0) {
+        toast("A planilha selecionada está vazia.", "warning");
+        return;
+      }
+
+      processarMatrizPlanilha(sheetData);
+    } catch (err: any) {
+      console.error("Erro ao ler arquivo Excel:", err);
+      toast("Erro ao ler arquivo Excel. Verifique se o formato é válido (.xlsx, .xls ou .csv)", "error");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function processarMatrizPlanilha(sheetData: any[][]) {
+  produtosImportacaoExcel = [];
+
+  // 1. Localizar a linha de cabeçalho (analisando as primeiras 15 linhas)
+  let bestHeaderRowIndex = -1;
+  let maxMatchedFields = 0;
+  let bestColMapping: { [colIndex: number]: string } = {};
+
+  const scanLimit = Math.min(15, sheetData.length);
+  for (let r = 0; r < scanLimit; r++) {
+    const row = sheetData[r];
+    if (!Array.isArray(row)) continue;
+
+    const currentMapping: { [colIndex: number]: string } = {};
+    let matchedCount = 0;
+
+    row.forEach((cellVal, colIdx) => {
+      const field = getFieldMapping(String(cellVal));
+      if (field && !Object.values(currentMapping).includes(field)) {
+        currentMapping[colIdx] = field;
+        matchedCount++;
+      }
+    });
+
+    if (matchedCount > maxMatchedFields) {
+      maxMatchedFields = matchedCount;
+      bestHeaderRowIndex = r;
+      bestColMapping = currentMapping;
+    }
+  }
+
+  // Se nenhuma linha de cabeçalho foi detectada com certeza, assumir a primeira linha (linha 0)
+  if (bestHeaderRowIndex === -1 || maxMatchedFields === 0) {
+    bestHeaderRowIndex = 0;
+    const row0 = sheetData[0] || [];
+    row0.forEach((cellVal, colIdx) => {
+      const field = getFieldMapping(String(cellVal));
+      if (field) bestColMapping[colIdx] = field;
+    });
+  }
+
+  // Se ainda não mapeou "nome", usar a primeira coluna com texto como "nome"
+  if (!Object.values(bestColMapping).includes("nome")) {
+    const headerRow = sheetData[bestHeaderRowIndex] || [];
+    for (let c = 0; c < headerRow.length; c++) {
+      if (!bestColMapping[c]) {
+        bestColMapping[c] = "nome";
+        break;
+      }
+    }
+  }
+
+  // 2. Processar cada linha de dados a partir de headerRowIndex + 1
+  for (let r = bestHeaderRowIndex + 1; r < sheetData.length; r++) {
+    const row = sheetData[r];
+    if (!Array.isArray(row) || row.length === 0) continue;
+
+    // Verificar se a linha não está completamente vazia
+    const temConteudo = row.some((c) => c !== undefined && c !== null && String(c).trim() !== "");
+    if (!temConteudo) continue;
+
+    const rowObj: any = {
+      nome: "",
+      marca: "",
+      categoria: "",
+      codigo_interno: "",
+      codigo_barras: "",
+      custo: 0,
+      venda: 0,
+      estoque: 0,
+      minimo: 5,
+    };
+
+    // Preencher campos de acordo com o mapeamento de colunas
+    row.forEach((cellVal, colIdx) => {
+      const field = bestColMapping[colIdx];
+      if (!field) return;
+
+      if (field === "custo" || field === "venda" || field === "estoque" || field === "minimo") {
+        rowObj[field] = parseExcelValueNumber(cellVal, field === "minimo" ? 5 : 0);
+      } else {
+        rowObj[field] = parseExcelValueString(cellVal);
+      }
+    });
+
+    // Se o nome ficou vazio, tentar pegar o primeiro texto não numérico da linha
+    if (!rowObj.nome) {
+      for (const cell of row) {
+        const str = parseExcelValueString(cell);
+        if (str && str.length > 1 && isNaN(Number(str.replace(",", ".")))) {
+          rowObj.nome = str;
+          break;
+        }
+      }
+    }
+
+    // Se ainda não tiver nome após todas as tentativas, pula a linha
+    if (!rowObj.nome) continue;
+
+    // Identificar se o produto já existe no catálogo do sistema
+    const existente = produtos.find(
+      (p) =>
+        (rowObj.codigo_barras && p.codigo_barras && p.codigo_barras === rowObj.codigo_barras) ||
+        (rowObj.codigo_interno && p.codigo_interno && p.codigo_interno === rowObj.codigo_interno) ||
+        p.nome.trim().toLowerCase() === rowObj.nome.toLowerCase()
+    );
+
+    produtosImportacaoExcel.push({
+      nome: rowObj.nome,
+      marca: rowObj.marca,
+      categoria: rowObj.categoria,
+      codigo_interno: rowObj.codigo_interno,
+      codigo_barras: rowObj.codigo_barras,
+      custo: rowObj.custo,
+      venda: rowObj.venda,
+      estoque: rowObj.estoque,
+      minimo: rowObj.minimo,
+      status: existente ? "Atualização" : "Novo",
+      existenteId: existente?.id,
+    });
+  }
+
+  if (produtosImportacaoExcel.length === 0) {
+    toast(
+      "Nenhum produto válido encontrado. Certifique-se de que a planilha possui colunas como 'Nome do Produto', 'Preço de Venda' e 'Estoque'.",
+      "warning"
+    );
+    return;
+  }
+
+  toast(`${produtosImportacaoExcel.length} produto(s) lido(s) com sucesso da planilha!`, "success");
+  renderPreviewExcel();
+}
+
+function renderPreviewExcel() {
+  const tbody = document.getElementById("tbodyPreviewExcel");
+  const areaPreview = document.getElementById("areaPreviewExcel");
+  const badgeTotal = document.getElementById("badgeTotalLidosExcel");
+  const btnConfirmar = document.getElementById("btnConfirmarImportacaoExcel") as HTMLButtonElement;
+
+  if (!tbody || !areaPreview) return;
+
+  const total = produtosImportacaoExcel.length;
+  const novos = produtosImportacaoExcel.filter((p) => p.status === "Novo").length;
+  const atualizacoes = total - novos;
+
+  if (badgeTotal) {
+    badgeTotal.textContent = `${total} itens encontrados (${novos} novos, ${atualizacoes} existentes)`;
+  }
+
+  tbody.innerHTML = produtosImportacaoExcel
+    .slice(0, 100) // Limite de 100 na prévia visual para altíssima fluidez
+    .map((p) => {
+      const isNovo = p.status === "Novo";
+      const statusBadge = isNovo
+        ? `<span class="badge bg-success-subtle text-success border border-success" style="font-size:11px;">+ Novo</span>`
+        : `<span class="badge bg-warning-subtle text-warning border border-warning" style="font-size:11px;">⟳ Atualizar</span>`;
+
+      return `
+        <tr>
+          <td>${statusBadge}</td>
+          <td class="fw-bold">${p.nome}</td>
+          <td>${p.marca || "-"}</td>
+          <td><span class="badge bg-surface2 text-muted border">${p.categoria || "Geral"}</span></td>
+          <td><small class="text-muted">${p.codigo_interno || "-"}</small></td>
+          <td><small class="text-muted">${p.codigo_barras || "-"}</small></td>
+          <td class="text-end">${brl(p.custo)}</td>
+          <td class="text-end fw-bold" style="color:var(--accent);">${brl(p.venda)}</td>
+          <td class="text-end">${p.estoque} un.</td>
+          <td class="text-end">${p.minimo}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  if (total > 100) {
+    tbody.innerHTML += `
+      <tr>
+        <td colspan="10" class="text-center py-2 bg-surface2 text-muted fst-italic">
+          ... e mais ${total - 100} produtos adicionais prontos para importação.
+        </td>
+      </tr>
+    `;
+  }
+
+  areaPreview.style.display = "block";
+  if (btnConfirmar) {
+    btnConfirmar.disabled = false;
+    btnConfirmar.innerHTML = `<i class="fa-solid fa-cloud-arrow-up me-1"></i> Confirmar Importação de ${total} Produtos`;
+  }
+}
+
+function baixarModeloPlanilhaExcel() {
+  const dadosModelo = [
+    {
+      "Nome do Produto": "Creatina Monohidratada 300g",
+      "Marca": "Max Titanium",
+      "Categoria": "Aminoácidos",
+      "Código Interno": "CR-001",
+      "Código de Barras": "7891000100011",
+      "Preço de Custo": 45.0,
+      "Preço de Venda": 89.9,
+      "Estoque Atual": 20,
+      "Estoque Mínimo": 5,
+    },
+    {
+      "Nome do Produto": "Whey Protein Concentrado 900g",
+      "Marca": "IntegralMedica",
+      "Categoria": "Proteínas",
+      "Código Interno": "WP-002",
+      "Código de Barras": "7891000100028",
+      "Preço de Custo": 65.0,
+      "Preço de Venda": 129.9,
+      "Estoque Atual": 15,
+      "Estoque Mínimo": 4,
+    },
+    {
+      "Nome do Produto": "Barra de Proteína Crisp 45g",
+      "Marca": "IntegralMedica",
+      "Categoria": "Snacks",
+      "Código Interno": "BAR-003",
+      "Código de Barras": "7891000100035",
+      "Preço de Custo": 3.5,
+      "Preço de Venda": 7.5,
+      "Estoque Atual": 50,
+      "Estoque Mínimo": 10,
+    },
+    {
+      "Nome do Produto": "BCAA 2:1:1 120 Cápsulas",
+      "Marca": "Growth",
+      "Categoria": "Aminoácidos",
+      "Código Interno": "BCAA-004",
+      "Código de Barras": "7891000100042",
+      "Preço de Custo": 28.0,
+      "Preço de Venda": 54.9,
+      "Estoque Atual": 12,
+      "Estoque Mínimo": 3,
+    },
+    {
+      "Nome do Produto": "Coqueteleira Shaker 600ml",
+      "Marca": "Probiótica",
+      "Categoria": "Acessórios",
+      "Código Interno": "AC-005",
+      "Código de Barras": "7891000100059",
+      "Preço de Custo": 9.0,
+      "Preço de Venda": 22.0,
+      "Estoque Atual": 25,
+      "Estoque Mínimo": 5,
+    },
+  ];
+
+  const ws = XLSX.utils.json_to_sheet(dadosModelo);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Produtos");
+  XLSX.writeFile(wb, "modelo_importacao_produtos.xlsx");
+  toast("Planilha modelo baixada com sucesso!", "success");
+}
+
+async function processarImportacaoExcel() {
+  if (produtosImportacaoExcel.length === 0) {
+    toast("Nenhum produto para importar.", "warning");
+    return;
+  }
+
+  const chkAtualizar = document.getElementById("chkAtualizarExistentes") as HTMLInputElement;
+  const atualizarExistentes = chkAtualizar ? chkAtualizar.checked : true;
+
+  const btnConfirmar = document.getElementById("btnConfirmarImportacaoExcel") as HTMLButtonElement;
+  btnConfirmar.disabled = true;
+  btnConfirmar.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Salvando produtos no banco...`;
+
+  try {
+    const res = await apiFetch("/api/produtos/importar-lote", {
+      method: "POST",
+      body: JSON.stringify({
+        itens: produtosImportacaoExcel,
+        atualizarExistentes,
+      }),
+    });
+
+    Swal.fire({
+      title: "Importação Concluída!",
+      text: res.message || `${res.inseridos} produtos inseridos e ${res.atualizados} atualizados.`,
+      icon: "success",
+      confirmButtonText: "Entendido",
+      confirmButtonColor: "var(--accent)",
+    });
+
+    bootstrap.Modal.getInstance(document.getElementById("modalImportarExcel"))?.hide();
+    carregarProdutos();
+    carregarEstoque();
+  } catch (err: any) {
+    console.error("Erro na importação:", err);
+    Swal.fire({
+      title: "Erro na importação",
+      text: err.message || "Não foi possível importar a planilha.",
+      icon: "error",
+    });
+  } finally {
+    btnConfirmar.disabled = false;
+    btnConfirmar.innerHTML = `<i class="fa-solid fa-cloud-arrow-up me-1"></i> Confirmar e Salvar Produtos`;
   }
 }
 
@@ -774,19 +1468,24 @@ function popularSelectProdutosEstoque() {
   sel.innerHTML = produtos.map((p) => `<option value="${p.id}">${p.nome} (Atual: ${p.estoque})</option>`).join("");
 }
 
-async function carregarEstoque() {
-  await carregarProdutos();
-  const valorTotal = produtos.reduce((s, p) => s + (p.estoque * p.custo), 0);
-  (document.getElementById("estValorTotal") as HTMLElement).textContent = brl(valorTotal);
+function renderEstoqueVisao() {
+  const valorTotal = produtos.reduce((s, p) => s + p.estoque * p.custo, 0);
+  const elTotal = document.getElementById("estValorTotal");
+  if (elTotal) elTotal.textContent = brl(valorTotal);
 
   const tbody = document.getElementById("tbodyEstoqueVisao");
   if (tbody) {
-    tbody.innerHTML = produtos.map((p) => {
-      let badge = `<span class="badge-status-ok">Normal</span>`;
-      if (p.estoque <= 0) badge = `<span class="badge-status-out">Esgotado</span>`;
-      else if (p.estoque <= p.minimo) badge = `<span class="badge-status-low">Baixo</span>`;
+    if (produtos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" class="empty-state">Nenhum produto cadastrado no estoque</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = produtos
+      .map((p) => {
+        let badge = `<span class="badge-status-ok">Normal</span>`;
+        if (p.estoque <= 0) badge = `<span class="badge-status-out">Esgotado</span>`;
+        else if (p.estoque <= p.minimo) badge = `<span class="badge-status-low">Baixo</span>`;
 
-      return `
+        return `
         <tr>
           <td><strong>${p.nome}</strong></td>
           <td class="text-end fw-bold">${p.estoque}</td>
@@ -796,35 +1495,54 @@ async function carregarEstoque() {
           <td>${badge}</td>
         </tr>
       `;
-    }).join("");
+      })
+      .join("");
   }
+}
+
+async function carregarEstoque() {
+  if (produtos.length === 0) {
+    await carregarProdutos();
+  }
+  renderEstoqueVisao();
+}
+
+function renderHistoricoEstoqueFromList(list: any[]) {
+  const tbody = document.getElementById("tbodyHistoricoEstoque");
+  if (!tbody) return;
+
+  if (!list || list.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">Nenhuma movimentação registrada</td></tr>`;
+    return;
+  }
+
+  const labels: Record<string, string> = { entrada: "Entrada", saida: "Saída", ajuste: "Ajuste" };
+  const badges: Record<string, string> = { entrada: "bg-success", saida: "bg-danger", ajuste: "bg-warning" };
+
+  tbody.innerHTML = list
+    .map((m: any) => `
+      <tr>
+        <td>${fmtDataHora(m.data)}</td>
+        <td><strong>${m.produto_nome || "Produto #" + m.produto_id}</strong></td>
+        <td><span class="badge ${badges[m.tipo] || "bg-secondary"}">${labels[m.tipo] || m.tipo}</span></td>
+        <td class="text-end">${m.tipo === "ajuste" ? `${m.qtd_anterior} → ${m.qtd_nova}` : m.qtd}</td>
+        <td>${m.motivo || "-"}</td>
+      </tr>
+    `)
+    .join("");
 }
 
 async function carregarHistoricoEstoque() {
   try {
     const hist = await apiFetch("/api/estoque/movimentacoes");
-    const tbody = document.getElementById("tbodyHistoricoEstoque");
-    if (!tbody) return;
-
-    if (hist.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="empty-state">Nenhuma movimentação registrada</td></tr>`;
-      return;
-    }
-
-    const labels: Record<string, string> = { entrada: "Entrada", saida: "Saída", ajuste: "Ajuste" };
-    const badges: Record<string, string> = { entrada: "bg-success", saida: "bg-danger", ajuste: "bg-warning" };
-
-    tbody.innerHTML = hist.map((m: any) => `
-      <tr>
-        <td>${fmtDataHora(m.data)}</td>
-        <td><strong>${m.produto_nome || "Produto #" + m.produto_id}</strong></td>
-        <td><span class="badge ${badges[m.tipo]}">${labels[m.tipo]}</span></td>
-        <td class="text-end">${m.tipo === "ajuste" ? `${m.qtd_anterior} → ${m.qtd_nova}` : m.qtd}</td>
-        <td>${m.motivo || "-"}</td>
-      </tr>
-    `).join("");
+    movimentacoes = hist;
+    renderHistoricoEstoqueFromList(hist);
   } catch (err: any) {
-    toast("Erro ao carregar histórico de estoque", "error");
+    if (movimentacoes.length > 0) {
+      renderHistoricoEstoqueFromList(movimentacoes);
+    } else {
+      toast("Erro ao carregar histórico de estoque", "error");
+    }
   }
 }
 
@@ -994,6 +1712,12 @@ function popularSelectVendedoresVenda() {
 
   if (sel) {
     sel.innerHTML = `<option value="">Selecione o vendedor...</option>` + options;
+    if (currentUser?.role === "vendedor" || currentUser?.role === "caixa") {
+      const match = ativos.find((v) => v.user_id === currentUser?.id || v.nome.toLowerCase().includes(currentUser?.nome.toLowerCase().split(" ")[0]));
+      if (match) {
+        sel.value = String(match.id);
+      }
+    }
   }
   if (filtroSel) {
     filtroSel.innerHTML = `<option value="todos">Todos os vendedores</option>` + options;
@@ -1001,11 +1725,6 @@ function popularSelectVendedoresVenda() {
 }
 
 async function finalizarVenda() {
-  if (currentUser?.role === "vendedor" && policies.ocultarVendasVendedor) {
-    toast("Vendedores não têm permissão para finalizar vendas no PDV.", "error");
-    return;
-  }
-
   if (carrinho.length === 0) {
     toast("O carrinho está vazio", "warning");
     return;
@@ -1120,9 +1839,6 @@ function limparFiltroVendas() {
 
 async function carregarVendasFiltradas() {
   if (!currentUser) return;
-  if (currentUser?.role === "vendedor" && policies.ocultarVendasVendedor) {
-    return;
-  }
 
   const de = (document.getElementById("vendasFiltroDe") as HTMLInputElement)?.value;
   const ate = (document.getElementById("vendasFiltroAte") as HTMLInputElement)?.value;
@@ -1951,6 +2667,7 @@ async function salvarVendedor() {
     bootstrap.Modal.getInstance(document.getElementById("modalVendedor"))?.hide();
     carregarVendedores();
     carregarComissoes();
+    if (currentUser?.role === "admin") carregarUsuarios();
   } catch (err: any) {
     toast(err.message, "error");
   }
@@ -1975,6 +2692,7 @@ async function excluirVendedor() {
         toast("Vendedor excluído");
         carregarVendedores();
         carregarComissoes();
+        if (currentUser?.role === "admin") carregarUsuarios();
       } catch (err: any) {
         toast(err.message, "error");
       }
@@ -2031,6 +2749,14 @@ async function carregarComissoes() {
 /*                               GESTÃO DE USUÁRIOS                           */
 /* ========================================================================== */
 
+function toggleUsrComissaoField() {
+  const role = (document.getElementById("usrRole") as HTMLSelectElement)?.value;
+  const wrap = document.getElementById("usrComissaoWrap");
+  if (wrap) {
+    wrap.style.display = role === "vendedor" ? "block" : "none";
+  }
+}
+
 async function carregarUsuarios() {
   if (currentUser?.role !== "admin") return;
 
@@ -2044,7 +2770,10 @@ async function carregarUsuarios() {
         <td><strong>${u.nome}</strong></td>
         <td><code>${u.username}</code></td>
         <td>${u.email}</td>
-        <td><span class="badge-role role-${u.role}">${u.role.toUpperCase()}</span></td>
+        <td>
+          <span class="badge-role role-${u.role}">${u.role.toUpperCase()}</span>
+          ${u.role === 'vendedor' ? `<span class="badge bg-light text-dark border ms-1">${(u.comissao_percentual || 5).toFixed(1)}% Com.</span>` : ''}
+        </td>
         <td><span class="badge ${u.ativo ? 'badge-pago' : 'badge-pendente'}">${u.ativo ? 'Ativo' : 'Desativado'}</span></td>
         <td>${fmtData(u.created_at)}</td>
         <td class="text-center">
@@ -2070,9 +2799,11 @@ function openNovoUsuarioModal() {
   (document.getElementById("usrSenhaLabel") as HTMLElement).textContent = "Senha de Acesso *";
   (document.getElementById("usrSenhaDica") as HTMLElement).style.display = "none";
   (document.getElementById("usrRole") as HTMLSelectElement).value = "vendedor";
+  (document.getElementById("usrComissao") as HTMLInputElement).value = "5";
   (document.getElementById("usrAtivo") as HTMLInputElement).checked = true;
   (document.getElementById("btnExcluirUsuario") as HTMLElement).style.display = "none";
 
+  toggleUsrComissaoField();
   bootstrap.Modal.getOrCreateInstance(document.getElementById("modalUsuario")).show();
 }
 
@@ -2092,7 +2823,10 @@ async function openEditarUsuarioModal(id: number) {
     (document.getElementById("usrSenhaLabel") as HTMLElement).textContent = "Nova Senha (opcional)";
     (document.getElementById("usrSenhaDica") as HTMLElement).style.display = "block";
     (document.getElementById("usrRole") as HTMLSelectElement).value = u.role;
+    (document.getElementById("usrComissao") as HTMLInputElement).value = String(u.comissao_percentual !== undefined ? u.comissao_percentual : 5);
     (document.getElementById("usrAtivo") as HTMLInputElement).checked = u.ativo !== 0;
+
+    toggleUsrComissaoField();
 
     const btnExcluir = document.getElementById("btnExcluirUsuario") as HTMLElement;
     btnExcluir.style.display = u.id === currentUser?.id ? "none" : "inline-block";
@@ -2107,6 +2841,7 @@ async function salvarUsuario() {
   const username = (document.getElementById("usrUsername") as HTMLInputElement).value.trim();
   const email = (document.getElementById("usrEmail") as HTMLInputElement).value.trim();
   const role = (document.getElementById("usrRole") as HTMLSelectElement).value;
+  const comissao_percentual = parseFloat((document.getElementById("usrComissao") as HTMLInputElement).value) || 0;
   const ativo = (document.getElementById("usrAtivo") as HTMLInputElement).checked;
   const password = (document.getElementById("usrSenha") as HTMLInputElement).value.trim();
 
@@ -2119,7 +2854,7 @@ async function salvarUsuario() {
     if (id) {
       await apiFetch(`/api/auth/users/${id}`, {
         method: "PUT",
-        body: JSON.stringify({ nome, email, role, ativo, password }),
+        body: JSON.stringify({ nome, email, role, ativo, password, comissao_percentual }),
       });
       toast("Usuário atualizado com sucesso");
     } else {
@@ -2129,12 +2864,14 @@ async function salvarUsuario() {
       }
       await apiFetch("/api/auth/users", {
         method: "POST",
-        body: JSON.stringify({ username, nome, email, role, password }),
+        body: JSON.stringify({ username, nome, email, role, password, comissao_percentual }),
       });
       toast("Usuário cadastrado com sucesso");
     }
     bootstrap.Modal.getInstance(document.getElementById("modalUsuario"))?.hide();
     carregarUsuarios();
+    carregarVendedores();
+    carregarComissoes();
   } catch (err: any) {
     toast(err.message, "error");
   }
@@ -2158,6 +2895,8 @@ async function excluirUsuario() {
         bootstrap.Modal.getInstance(document.getElementById("modalUsuario"))?.hide();
         toast("Usuário excluído");
         carregarUsuarios();
+        carregarVendedores();
+        carregarComissoes();
       } catch (err: any) {
         toast(err.message, "error");
       }
@@ -2317,10 +3056,17 @@ Object.assign(window, {
   executarLogin,
   logoutUsuario,
   preencherLogin,
+  preencherELogar,
+  toggleMostrarSenhaLogin,
+  restaurarCredenciaisPadrao,
   openUserMenuModal,
   openProdutoModal,
   salvarProduto,
   excluirProduto,
+  openImportarExcelModal,
+  handleExcelFileUpload,
+  baixarModeloPlanilhaExcel,
+  processarImportacaoExcel,
   calcMargem,
   handleFoto,
   renderProdutosFiltrados,
@@ -2363,6 +3109,7 @@ Object.assign(window, {
   imprimirRelatorioAtual,
   openNovoUsuarioModal,
   openEditarUsuarioModal,
+  toggleUsrComissaoField,
   salvarUsuario,
   excluirUsuario,
   handleLogo,
@@ -2408,4 +3155,25 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Check auth session
   verificarSessao();
+
+  // Drag and drop support for Excel import
+  const dropZone = document.getElementById("dropZoneExcel");
+  const inputExcel = document.getElementById("inputArquivoExcel") as HTMLInputElement;
+  if (dropZone && inputExcel) {
+    dropZone.addEventListener("dragover", (e: DragEvent) => {
+      e.preventDefault();
+      dropZone.classList.add("border-primary", "bg-surface2");
+    });
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("border-primary", "bg-surface2");
+    });
+    dropZone.addEventListener("drop", (e: DragEvent) => {
+      e.preventDefault();
+      dropZone.classList.remove("border-primary", "bg-surface2");
+      if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+        inputExcel.files = e.dataTransfer.files;
+        handleExcelFileUpload({ target: inputExcel } as any);
+      }
+    });
+  }
 });

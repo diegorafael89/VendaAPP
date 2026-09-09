@@ -218,8 +218,9 @@
       <img id="topbarLogo" src="" style="display:none;" alt="Logotipo">
       <span id="topbarNome">Loja de Suplementos</span>
     </div>
-    <span class="badge bg-success-subtle text-success border border-success-subtle d-none d-md-inline-block" style="font-size: 11px;">
-      <i class="fa-solid fa-database me-1"></i> Banco de Dados Seguro (SQLite)
+    <span class="badge bg-success-subtle text-success border border-success-subtle d-inline-flex align-items-center gap-1" id="topbarSyncBadge" style="font-size: 11px;">
+      <span class="spinner-grow spinner-grow-sm text-success" style="width: 7px; height: 7px;" role="status"></span>
+      <i class="fa-solid fa-bolt me-1"></i> <span id="topbarSyncText">Firestore Tempo Real Ativo</span>
     </span>
   </div>
   <div class="actions">
@@ -371,8 +372,18 @@
   <!-- ====================================================================== -->
   <section id="tab-produtos" class="screen">
     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-      <h4 class="mb-0 fw-bold">Catálogo de Produtos</h4>
-      <button class="btn btn-accent" id="btnNovoProduto" onclick="openProdutoModal()"><i class="fa-solid fa-plus me-1"></i> Novo produto</button>
+      <div>
+        <h4 class="mb-0 fw-bold">Catálogo de Produtos</h4>
+        <small class="text-muted">Gerencie produtos, estoque, preços e importação em lote por planilha</small>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-outline-success" id="btnImportarExcel" onclick="openImportarExcelModal()">
+          <i class="fa-solid fa-file-excel me-1"></i> Importar Planilha Excel
+        </button>
+        <button class="btn btn-accent" id="btnNovoProduto" onclick="openProdutoModal()">
+          <i class="fa-solid fa-plus me-1"></i> Novo produto
+        </button>
+      </div>
     </div>
     <div class="row g-2 mb-3">
       <div class="col-md-8">
@@ -387,7 +398,7 @@
     <div class="table-modern table-responsive">
       <table class="table align-middle mb-0" id="tabelaProdutos">
         <thead><tr>
-          <th>Foto</th><th>Nome</th><th>Marca</th><th>Categoria</th><th>Sabor/Peso</th>
+          <th>Foto</th><th>Nome</th><th>Marca</th><th>Categoria</th><th>Cód. / Barras</th>
           <th class="text-end">Custo</th><th class="text-end">Venda</th><th class="text-end">Margem</th>
           <th class="text-end">Estoque</th><th class="text-center">Ações</th>
         </tr></thead>
@@ -682,13 +693,19 @@
   <!-- ====================================================================== -->
   <section id="tab-comissoes" class="screen">
     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-      <h4 class="mb-0 fw-bold">Comissões de Vendedores</h4>
-      <button class="btn btn-accent" id="btnNovoVendedor" onclick="openVendedorModal()"><i class="fa-solid fa-plus me-1"></i> Novo vendedor</button>
+      <div>
+        <h4 class="mb-0 fw-bold">Comissões de Vendedores</h4>
+        <small class="text-muted">Apuração automática vinculada aos usuários com perfil <strong>Vendedor</strong> na Gestão de Usuários.</small>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-outline-secondary" id="btnIrParaUsuarios" onclick="navegarPara('tab-usuarios')"><i class="fa-solid fa-users-gear me-1"></i> Gestão de Usuários</button>
+        <button class="btn btn-accent" id="btnNovoVendedor" onclick="openNovoUsuarioModal()"><i class="fa-solid fa-user-plus me-1"></i> Novo Vendedor</button>
+      </div>
     </div>
 
     <div class="table-modern table-responsive mb-4">
       <table class="table align-middle mb-0" id="tabelaVendedores">
-        <thead><tr><th>Nome</th><th class="text-end">Comissão padrão (%)</th><th>Status</th><th class="text-center">Ações</th></tr></thead>
+        <thead><tr><th>Vendedor</th><th class="text-end">Comissão padrão (%)</th><th>Status</th><th class="text-center">Ações</th></tr></thead>
         <tbody id="tbodyVendedores"></tbody>
       </table>
     </div>
@@ -994,11 +1011,25 @@
         <form onsubmit="executarLogin(event)">
           <div class="mb-3">
             <label class="form-label">Usuário ou E-mail</label>
-            <input type="text" class="form-control" id="loginIdentifier" placeholder="admin ou admin@loja.com" required autocomplete="username">
+            <div class="input-group">
+              <span class="input-group-text bg-surface2 border-line"><i class="fa-solid fa-user text-muted"></i></span>
+              <input type="text" class="form-control" id="loginIdentifier" placeholder="admin ou admin@loja.com" required autocomplete="username">
+            </div>
           </div>
           <div class="mb-3">
-            <label class="form-label">Senha</label>
-            <input type="password" class="form-control" id="loginPassword" placeholder="••••••••" required autocomplete="current-password">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <label class="form-label mb-0">Senha</label>
+              <button type="button" class="btn btn-link p-0 text-muted" style="font-size:12px; text-decoration:none;" onclick="toggleMostrarSenhaLogin()">
+                <i class="fa-solid fa-eye" id="iconOlhoSenha"></i> <span id="textOlhoSenha">Mostrar</span>
+              </button>
+            </div>
+            <div class="input-group">
+              <span class="input-group-text bg-surface2 border-line"><i class="fa-solid fa-lock text-muted"></i></span>
+              <input type="password" class="form-control" id="loginPassword" placeholder="••••••••" required autocomplete="current-password">
+              <button class="btn btn-outline-secondary border-line" type="button" onclick="toggleMostrarSenhaLogin()" title="Ver/ocultar senha">
+                <i class="fa-solid fa-eye" id="btnEyeIcon"></i>
+              </button>
+            </div>
           </div>
           <button type="submit" class="btn btn-accent w-100 py-2 fs-6 mb-3" id="btnLoginSubmit">
             <i class="fa-solid fa-right-to-bracket me-1"></i> Entrar no Sistema
@@ -1006,16 +1037,24 @@
         </form>
 
         <div class="pt-3 border-top">
-          <small class="text-muted d-block mb-2 text-center">Atalhos de Acesso Rápido para Demonstração:</small>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <small class="text-muted fw-bold">Selecione para entrar automaticamente:</small>
+            <button class="btn btn-link p-0 text-accent" style="font-size: 11.5px; text-decoration: none;" onclick="restaurarCredenciaisPadrao()" title="Restaura usuários admin/admin123 se houver erro">
+              <i class="fa-solid fa-arrows-rotate me-1"></i> Restaurar Senhas Padrão
+            </button>
+          </div>
           <div class="d-flex flex-column gap-1">
-            <button class="btn btn-sm btn-outline-secondary text-start" onclick="preencherLogin('admin', 'admin123')">
-              <i class="fa-solid fa-crown me-1 text-warning"></i> <strong>Administrador:</strong> admin / admin123 (Acesso total)
+            <button class="btn btn-sm btn-outline-secondary text-start d-flex justify-content-between align-items-center" onclick="preencherELogar('admin', 'admin123')">
+              <span><i class="fa-solid fa-crown me-1 text-warning"></i> <strong>Administrador:</strong> admin / admin123</span>
+              <span class="badge bg-warning-subtle text-warning" style="font-size: 10px;">Total</span>
             </button>
-            <button class="btn btn-sm btn-outline-secondary text-start" onclick="preencherLogin('vendedor', 'vendedor123')">
-              <i class="fa-solid fa-user-tag me-1 text-info"></i> <strong>Vendedor:</strong> vendedor / vendedor123 (Tela de Venda Oculta)
+            <button class="btn btn-sm btn-outline-secondary text-start d-flex justify-content-between align-items-center" onclick="preencherELogar('vendedor', 'vendedor123')">
+              <span><i class="fa-solid fa-user-check me-1 text-success"></i> <strong>Vendedor / Caixa:</strong> vendedor / vendedor123</span>
+              <span class="badge bg-success-subtle text-success" style="font-size: 10px;">PDV & Vendas</span>
             </button>
-            <button class="btn btn-sm btn-outline-secondary text-start" onclick="preencherLogin('caixa', 'caixa123')">
-              <i class="fa-solid fa-cash-register me-1 text-success"></i> <strong>Caixa:</strong> caixa / caixa123 (Operador do PDV)
+            <button class="btn btn-sm btn-outline-secondary text-start d-flex justify-content-between align-items-center" onclick="preencherELogar('gerente', 'gerente123')">
+              <span><i class="fa-solid fa-user-shield me-1 text-info"></i> <strong>Gerente:</strong> gerente / gerente123</span>
+              <span class="badge bg-info-subtle text-info" style="font-size: 10px;">Gestão</span>
             </button>
           </div>
         </div>
@@ -1067,17 +1106,15 @@
           </div>
         </div>
         <div class="row g-3">
-          <div class="col-md-6"><label class="form-label">Nome do Produto *</label><input class="form-control" id="prodNome" required></div>
-          <div class="col-md-6"><label class="form-label">Marca / Fabricante</label><input class="form-control" id="prodMarca"></div>
-          <div class="col-md-4"><label class="form-label">Categoria</label><input class="form-control" id="prodCategoria" placeholder="Ex: Proteínas, Creatinas..."></div>
-          <div class="col-md-4"><label class="form-label">Sabor (opcional)</label><input class="form-control" id="prodSabor"></div>
-          <div class="col-md-4"><label class="form-label">Peso / Volume</label><input class="form-control" id="prodPeso" placeholder="Ex: 900g, 300g"></div>
-          <div class="col-md-6"><label class="form-label">Código interno</label><input class="form-control" id="prodCodigoInterno"></div>
-          <div class="col-md-6"><label class="form-label">Código de barras (EAN)</label><input class="form-control" id="prodCodigoBarras"></div>
+          <div class="col-md-6"><label class="form-label">Nome do Produto *</label><input class="form-control" id="prodNome" placeholder="Ex: Creatina Monohidratada 300g" required></div>
+          <div class="col-md-6"><label class="form-label">Marca / Fabricante</label><input class="form-control" id="prodMarca" placeholder="Ex: Max Titanium, IntegralMedica"></div>
+          <div class="col-md-4"><label class="form-label">Categoria</label><input class="form-control" id="prodCategoria" placeholder="Ex: Proteínas, Aminoácidos"></div>
+          <div class="col-md-4"><label class="form-label">Código interno</label><input class="form-control" id="prodCodigoInterno" placeholder="Ex: PRD-001"></div>
+          <div class="col-md-4"><label class="form-label">Código de barras (EAN)</label><input class="form-control" id="prodCodigoBarras" placeholder="Ex: 7891234567890"></div>
           <div class="col-md-4"><label class="form-label">Valor de custo (R$) *</label><input type="number" step="0.01" min="0" class="form-control" id="prodCusto" oninput="calcMargem()" required></div>
           <div class="col-md-4"><label class="form-label">Valor de venda (R$) *</label><input type="number" step="0.01" min="0" class="form-control" id="prodVenda" oninput="calcMargem()" required></div>
           <div class="col-md-4"><label class="form-label">Margem de lucro</label><input class="form-control" id="prodMargem" disabled></div>
-          <div class="col-md-6"><label class="form-label">Estoque inicial</label><input type="number" step="1" min="0" class="form-control" id="prodEstoqueInicial"></div>
+          <div class="col-md-6"><label class="form-label">Estoque inicial</label><input type="number" step="1" min="0" class="form-control" id="prodEstoqueInicial" placeholder="0"></div>
           <div class="col-md-6"><label class="form-label">Estoque mínimo de alerta</label><input type="number" step="1" min="0" class="form-control" id="prodMinimo" value="5"></div>
         </div>
       </div>
@@ -1085,6 +1122,91 @@
         <button class="btn btn-outline-danger me-auto" id="btnExcluirProduto" style="display:none;" onclick="excluirProduto()">Excluir</button>
         <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
         <button class="btn btn-accent" onclick="salvarProduto()">Salvar no Banco</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================================================================== -->
+<!-- MODAL: IMPORTAR PRODUTOS POR PLANILHA EXCEL                            -->
+<!-- ====================================================================== -->
+<div class="modal fade" id="modalImportarExcel" tabindex="-1">
+  <div class="modal-dialog modal-dialog-scrollable modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h5 class="modal-title fw-bold"><i class="fa-solid fa-file-excel text-success me-2"></i>Importar Produtos via Planilha Excel</h5>
+          <small class="text-muted">Importe ou atualize centenas de produtos instantaneamente via arquivos .xlsx, .xls ou .csv</small>
+        </div>
+        <button class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Card de Upload e Instruções -->
+        <div class="card-modern mb-3">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <div>
+              <div class="fw-bold mb-1">Passo 1: Selecione a planilha do Excel</div>
+              <small class="text-muted">Suporta arquivos Excel (.xlsx, .xls) ou texto delimitado (.csv).</small>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" onclick="baixarModeloPlanilhaExcel()">
+              <i class="fa-solid fa-download me-1 text-success"></i> Baixar Planilha Modelo (.xlsx)
+            </button>
+          </div>
+
+          <div class="p-4 border rounded-3 text-center bg-surface2" id="dropZoneExcel" style="border: 2px dashed var(--line) !important; cursor: pointer;" onclick="document.getElementById('inputArquivoExcel').click()">
+            <input type="file" id="inputArquivoExcel" accept=".xlsx, .xls, .csv" style="display: none;" onchange="handleExcelFileUpload(event)">
+            <div style="font-size: 36px;" class="mb-2">📊</div>
+            <div class="fw-bold fs-6 mb-1">Clique para selecionar ou arraste sua planilha aqui</div>
+            <small class="text-muted d-block mb-2">Formatos aceitos: .xlsx (Excel moderno), .xls (Excel antigo), .csv</small>
+            <span class="btn btn-sm btn-accent" onclick="event.stopPropagation(); document.getElementById('inputArquivoExcel').click()">
+              <i class="fa-solid fa-folder-open me-1"></i> Procurar Arquivo no Computador
+            </span>
+          </div>
+
+          <div class="form-check form-switch mt-3">
+            <input class="form-check-input" type="checkbox" id="chkAtualizarExistentes" checked>
+            <label class="form-check-label fw-bold" for="chkAtualizarExistentes">
+              Atualizar preços e estoque se o produto já existir (por Código de Barras, Código Interno ou Nome)
+            </label>
+          </div>
+        </div>
+
+        <!-- Área de Pré-visualização dos Produtos -->
+        <div id="areaPreviewExcel" style="display: none;">
+          <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+            <div>
+              <span class="fw-bold">Passo 2: Prévia dos Produtos Encontrados</span>
+              <span class="badge bg-accent ms-2" id="badgeTotalLidosExcel">0 produtos</span>
+            </div>
+            <small class="text-muted" id="resumoValoresExcel"></small>
+          </div>
+
+          <div class="table-modern table-responsive" style="max-height: 340px; overflow-y: auto;">
+            <table class="table align-middle mb-0" style="font-size: 13px;">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Nome do Produto</th>
+                  <th>Marca</th>
+                  <th>Categoria</th>
+                  <th>Cód. Interno</th>
+                  <th>Cód. Barras (EAN)</th>
+                  <th class="text-end">Custo (R$)</th>
+                  <th class="text-end">Venda (R$)</th>
+                  <th class="text-end">Estoque</th>
+                  <th class="text-end">Mínimo</th>
+                </tr>
+              </thead>
+              <tbody id="tbodyPreviewExcel"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+        <button class="btn btn-success" id="btnConfirmarImportacaoExcel" disabled onclick="processarImportacaoExcel()">
+          <i class="fa-solid fa-cloud-arrow-up me-1"></i> Confirmar e Salvar Produtos
+        </button>
       </div>
     </div>
   </div>
@@ -1219,13 +1341,17 @@
           </div>
           <div class="col-6">
             <label class="form-label">Perfil de Acesso *</label>
-            <select class="form-select" id="usrRole">
-              <option value="admin">Administrador (Total)</option>
+            <select class="form-select" id="usrRole" onchange="toggleUsrComissaoField()">
+              <option value="admin">Administrador (Acesso Total)</option>
               <option value="gerente">Gerente (Gestão & Relatórios)</option>
-              <option value="caixa">Caixa (Operador PDV)</option>
-              <option value="vendedor" selected>Vendedor (Restrito)</option>
+              <option value="vendedor" selected>Vendedor / Operador de Caixa (PDV & Vendas)</option>
             </select>
           </div>
+        </div>
+        <div class="mb-3" id="usrComissaoWrap">
+          <label class="form-label">Comissão de Vendas (%) *</label>
+          <input type="number" step="0.1" min="0" max="100" class="form-control" id="usrComissao" value="5">
+          <small class="text-muted">Percentual de comissão apurado automaticamente nas vendas deste vendedor.</small>
         </div>
         <div class="mb-3">
           <label class="form-label">E-mail *</label>

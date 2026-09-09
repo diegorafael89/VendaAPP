@@ -45,18 +45,30 @@ export function generateToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
-// Atomic sequential ID generator per collection
+const inMemoryCounters = new Map<string, number>();
+
+// Atomic sequential ID generator per collection with graceful local fallback
 export async function getNextSequence(collectionName: string): Promise<number> {
-  const counterRef = firestore.collection("_counters").doc(collectionName);
-  return await firestore.runTransaction(async (t) => {
-    const doc = await t.get(counterRef);
-    let nextId = 1;
-    if (doc.exists) {
-      nextId = (doc.data()?.last_id || 0) + 1;
-    }
-    t.set(counterRef, { last_id: nextId }, { merge: true });
+  try {
+    const counterRef = firestore.collection("_counters").doc(collectionName);
+    const nextId = await firestore.runTransaction(async (t) => {
+      const doc = await t.get(counterRef);
+      let id = 1;
+      if (doc.exists) {
+        id = (doc.data()?.last_id || 0) + 1;
+      }
+      t.set(counterRef, { last_id: id }, { merge: true });
+      return id;
+    });
+    inMemoryCounters.set(collectionName, Math.max(inMemoryCounters.get(collectionName) || 0, nextId));
     return nextId;
-  });
+  } catch (err: any) {
+    console.warn(`[Firestore Sequence] Erro ao sincronizar _counters/${collectionName}:`, err.message || err);
+    const current = inMemoryCounters.get(collectionName) || 0;
+    const nextId = current + 1;
+    inMemoryCounters.set(collectionName, nextId);
+    return nextId;
+  }
 }
 
 // In-memory sync / Cache helper to maintain blazing fast reads and compatibility

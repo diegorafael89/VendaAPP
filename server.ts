@@ -8,8 +8,11 @@ import {
   verifyPassword,
   generateToken,
   FirestoreSyncService,
+  seedDefaultUsersIfMissing,
+  resetDefaultUsers,
+  syncVendedoresWithUsers,
 } from "./server/db.ts";
-import { getNextSequence } from "./server/firestore-db.ts";
+import { getNextSequence, firestore } from "./server/firestore-db.ts";
 
 // Initialize tables in SQLite local cache
 initDatabase();
@@ -119,7 +122,7 @@ app.get("/api/health", (req: Request, res: Response) => {
 /* ========================================================================== */
 
 // Login
-app.post("/api/auth/login", (req: Request, res: Response) => {
+app.post("/api/auth/login", async (req: Request, res: Response) => {
   try {
     const { identifier, password } = req.body;
     if (!identifier || !password) {
@@ -127,15 +130,74 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
       return;
     }
 
-    const userQuery = db.prepare(`
+    const cleanIdentifier = String(identifier).trim();
+    const cleanPassword = String(password).trim();
+
+    let userQuery = db.prepare(`
       SELECT id, username, nome, email, password_hash, salt, role, ativo
       FROM users
-      WHERE LOWER(username) = LOWER(?) OR LOWER(email) = LOWER(?)
+      WHERE LOWER(TRIM(username)) = LOWER(?) OR LOWER(TRIM(email)) = LOWER(?)
     `);
-    const user = userQuery.get(identifier.trim(), identifier.trim()) as any;
+    let user = userQuery.get(cleanIdentifier, cleanIdentifier) as any;
+
+    // Self-healing fallback: If not in SQLite, check if table is empty or check Firestore directly
+    if (!user) {
+      seedDefaultUsersIfMissing();
+      user = userQuery.get(cleanIdentifier, cleanIdentifier) as any;
+    }
 
     if (!user) {
-      res.status(401).json({ error: "Credenciais inválidas." });
+      try {
+        // Try searching in Firestore users collection
+        const snap = await firestore.collection("users").get();
+        snap.forEach((doc) => {
+          const u = doc.data();
+          if (
+            (u.username && u.username.toLowerCase().trim() === cleanIdentifier.toLowerCase()) ||
+            (u.email && u.email.toLowerCase().trim() === cleanIdentifier.toLowerCase())
+          ) {
+            user = {
+              id: Number(u.id || doc.id),
+              username: u.username,
+              nome: u.nome,
+              email: u.email,
+              password_hash: u.password_hash,
+              salt: u.salt,
+              role: u.role || "vendedor",
+              ativo: u.ativo !== undefined ? (u.ativo ? 1 : 0) : 1,
+            };
+            // Cache in SQLite
+            db.prepare(`
+              INSERT OR REPLACE INTO users (id, username, nome, email, password_hash, salt, role, ativo, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              user.id,
+              user.username,
+              user.nome,
+              user.email,
+              user.password_hash,
+              user.salt,
+              user.role,
+              user.ativo,
+              u.created_at || new Date().toISOString()
+            );
+          }
+        });
+      } catch (e) {
+        console.warn("[Login Fallback] Erro ao consultar Firestore:", e);
+      }
+    }
+
+    // If still no user and identifier is "admin" or similar default
+    if (!user && (cleanIdentifier.toLowerCase() === "admin" || cleanIdentifier.toLowerCase() === "admin@loja.com")) {
+      resetDefaultUsers();
+      user = userQuery.get(cleanIdentifier, cleanIdentifier) as any;
+    }
+
+    if (!user) {
+      res.status(401).json({
+        error: "Usuário não encontrado. Use 'admin' e senha 'admin123', ou clique em Restaurar Credenciais.",
+      });
       return;
     }
 
@@ -144,9 +206,11 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
       return;
     }
 
-    const valid = verifyPassword(password, user.password_hash, user.salt);
+    const valid = verifyPassword(cleanPassword, user.password_hash, user.salt);
     if (!valid) {
-      res.status(401).json({ error: "Credenciais inválidas." });
+      res.status(401).json({
+        error: "Senha incorreta. A senha padrão do usuário " + user.username + " é '" + user.username + "123'.",
+      });
       return;
     }
 
@@ -166,7 +230,7 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
       created_at: now,
     });
 
-    const ocultarVendasVendedor = getConfigValue("ocultarVendasVendedor", "1") === "1";
+    const ocultarVendasVendedor = getConfigValue("ocultarVendasVendedor", "0") === "1";
 
     res.json({
       token,
@@ -187,9 +251,29 @@ app.post("/api/auth/login", (req: Request, res: Response) => {
   }
 });
 
+// Reset demo default users
+app.post("/api/auth/reset-defaults", (req: Request, res: Response) => {
+  try {
+    resetDefaultUsers();
+    res.json({
+      success: true,
+      message: "Credenciais padrão restauradas com sucesso! Utilize admin / admin123 para entrar.",
+      credentials: [
+        { role: "Administrador", user: "admin", pass: "admin123" },
+        { role: "Vendedor", user: "vendedor", pass: "vendedor123" },
+        { role: "Caixa", user: "caixa", pass: "caixa123" },
+        { role: "Gerente", user: "gerente", pass: "gerente123" },
+      ],
+    });
+  } catch (err: any) {
+    console.error("Erro ao resetar credenciais padrão:", err);
+    res.status(500).json({ error: "Erro ao resetar credenciais padrão." });
+  }
+});
+
 // Current User Info
 app.get("/api/auth/me", authMiddleware, (req: AuthRequest, res: Response) => {
-  const ocultarVendasVendedor = getConfigValue("ocultarVendasVendedor", "1") === "1";
+  const ocultarVendasVendedor = getConfigValue("ocultarVendasVendedor", "0") === "1";
   res.json({
     user: req.user,
     policies: {
@@ -211,8 +295,9 @@ app.post("/api/auth/logout", authMiddleware, (req: AuthRequest, res: Response) =
 // List Users (Admin only)
 app.get("/api/auth/users", authMiddleware, requireRole(["admin"]), (req: AuthRequest, res: Response) => {
   try {
+    syncVendedoresWithUsers();
     const users = db.prepare(`
-      SELECT id, username, nome, email, role, ativo, created_at
+      SELECT id, username, nome, email, role, ativo, comissao_percentual, created_at
       FROM users
       ORDER BY id ASC
     `).all();
@@ -225,7 +310,7 @@ app.get("/api/auth/users", authMiddleware, requireRole(["admin"]), (req: AuthReq
 // Create User (Admin only)
 app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), async (req: AuthRequest, res: Response) => {
   try {
-    const { username, nome, email, password, role } = req.body;
+    const { username, nome, email, password, role, comissao_percentual } = req.body;
     if (!username || !nome || !email || !password || !role) {
       res.status(400).json({ error: "Todos os campos são obrigatórios." });
       return;
@@ -243,11 +328,12 @@ app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), async (req: 
     const { hash, salt } = hashPassword(password);
     const now = new Date().toISOString();
     const newId = await getNextSequence("users");
+    const comissao = role === "vendedor" ? (parseFloat(comissao_percentual) || 5) : 0;
 
     db.prepare(`
-      INSERT INTO users (id, username, nome, email, password_hash, salt, role, ativo, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
-    `).run(newId, username.trim(), nome.trim(), email.trim(), hash, salt, role, now);
+      INSERT INTO users (id, username, nome, email, password_hash, salt, role, ativo, comissao_percentual, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(newId, username.trim(), nome.trim(), email.trim(), hash, salt, role, comissao, now);
 
     FirestoreSyncService.saveUser({
       id: newId,
@@ -258,8 +344,12 @@ app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), async (req: 
       salt: salt,
       role: role,
       ativo: 1,
+      comissao_percentual: comissao,
       created_at: now,
     });
+
+    // Automatically sync with vendedores
+    syncVendedoresWithUsers();
 
     res.json({ success: true, id: newId });
   } catch (err: any) {
@@ -271,7 +361,7 @@ app.post("/api/auth/users", authMiddleware, requireRole(["admin"]), async (req: 
 app.put("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: AuthRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { nome, email, role, ativo, password } = req.body;
+    const { nome, email, role, ativo, password, comissao_percentual } = req.body;
 
     const user = db.prepare("SELECT * FROM users WHERE id = ?").get(id) as any;
     if (!user) {
@@ -288,11 +378,13 @@ app.put("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: Aut
       userSalt = generated.salt;
     }
 
+    const comissao = role === "vendedor" ? (comissao_percentual !== undefined ? (parseFloat(comissao_percentual) || 0) : (user.comissao_percentual || 5)) : 0;
+
     db.prepare(`
       UPDATE users
-      SET nome = ?, email = ?, role = ?, ativo = ?, password_hash = ?, salt = ?
+      SET nome = ?, email = ?, role = ?, ativo = ?, password_hash = ?, salt = ?, comissao_percentual = ?
       WHERE id = ?
-    `).run(nome, email, role, ativo ? 1 : 0, passwordHash, userSalt, id);
+    `).run(nome.trim(), email.trim(), role, ativo ? 1 : 0, passwordHash, userSalt, comissao, id);
 
     FirestoreSyncService.saveUser({
       id,
@@ -301,10 +393,14 @@ app.put("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: Aut
       email: email.trim(),
       role,
       ativo: ativo ? 1 : 0,
+      comissao_percentual: comissao,
       password_hash: passwordHash,
       salt: userSalt,
       created_at: user.created_at || new Date().toISOString(),
     });
+
+    // Automatically sync with vendedores
+    syncVendedoresWithUsers();
 
     res.json({ success: true, message: "Usuário atualizado com sucesso." });
   } catch (err: any) {
@@ -321,7 +417,9 @@ app.delete("/api/auth/users/:id", authMiddleware, requireRole(["admin"]), (req: 
       return;
     }
     db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    db.prepare("DELETE FROM vendedores WHERE user_id = ?").run(id);
     FirestoreSyncService.deleteUser(id);
+    syncVendedoresWithUsers();
     res.json({ success: true, message: "Usuário excluído." });
   } catch (err: any) {
     res.status(500).json({ error: "Erro ao excluir usuário." });
@@ -512,6 +610,171 @@ app.delete("/api/produtos/:id", authMiddleware, requireRole(["admin", "gerente"]
   }
 });
 
+// Importação em lote de produtos via Planilha Excel / CSV
+app.post("/api/produtos/importar-lote", authMiddleware, requireRole(["admin", "gerente", "vendedor", "caixa"]), async (req: AuthRequest, res: Response) => {
+  try {
+    const { itens, atualizarExistentes = true } = req.body;
+    if (!Array.isArray(itens) || itens.length === 0) {
+      res.status(400).json({ error: "Nenhum produto válido enviado para importação." });
+      return;
+    }
+
+    let inseridos = 0;
+    let atualizados = 0;
+    let ignorados = 0;
+    const now = new Date().toISOString();
+
+    const maxIdRow: any = db.prepare("SELECT MAX(id) as maxId FROM produtos").get();
+    let nextAvailableId = Math.max(Number(maxIdRow?.maxId || 0), 0);
+
+    const updateStmt = db.prepare(`
+      UPDATE produtos
+      SET nome = ?, marca = ?, categoria = ?, sabor = ?, peso = ?, codigo_interno = ?, codigo_barras = ?, custo = ?, venda = ?, estoque = ?, minimo = ?, foto = ?, updated_at = ?
+      WHERE id = ?
+    `);
+
+    const insertStmt = db.prepare(`
+      INSERT INTO produtos (id, nome, marca, categoria, sabor, peso, codigo_interno, codigo_barras, custo, venda, estoque, minimo, foto, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const raw of itens) {
+      const nome = String(raw.nome || raw.Nome || raw.produto || raw.Produto || "").trim();
+      if (!nome) {
+        ignorados++;
+        continue;
+      }
+
+      const marca = String(raw.marca || raw.Marca || raw.fabricante || raw.Fabricante || "").trim();
+      const categoria = String(raw.categoria || raw.Categoria || raw.grupo || raw.Grupo || "").trim();
+      const sabor = String(raw.sabor || raw.Sabor || "").trim();
+      const peso = String(raw.peso || raw.Peso || "").trim();
+      const codigo_interno = String(raw.codigo_interno || raw.codigoInterno || raw["Código Interno"] || raw["Codigo Interno"] || raw.codigo || "").trim();
+      const codigo_barras = String(raw.codigo_barras || raw.codigoBarras || raw["Código de Barras"] || raw["Codigo de Barras"] || raw.EAN || raw.ean || "").trim();
+
+      const parseNum = (val: any, def: number = 0) => {
+        if (val === undefined || val === null || val === "") return def;
+        if (typeof val === "number") return isNaN(val) ? def : val;
+        const str = String(val).replace("R$", "").replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
+        const n = parseFloat(str);
+        return isNaN(n) ? def : n;
+      };
+
+      const custo = parseNum(raw.custo ?? raw.Custo ?? raw["Preço de Custo"] ?? raw["Preco Custo"] ?? raw["Valor Custo"], 0);
+      const venda = parseNum(raw.venda ?? raw.Venda ?? raw["Preço de Venda"] ?? raw["Preco Venda"] ?? raw["Valor Venda"], 0);
+      const estoque = parseNum(raw.estoque ?? raw.Estoque ?? raw["Estoque Atual"] ?? raw.quantidade ?? raw.Qtd, 0);
+      const minimo = parseNum(raw.minimo ?? raw.Minimo ?? raw["Estoque Mínimo"] ?? raw["Estoque Minimo"], 5);
+      const foto = String(raw.foto || raw.Foto || "").trim();
+
+      // Check if product already exists by codigo_barras, codigo_interno, or exact name
+      let existing: any = null;
+      if (codigo_barras) {
+        existing = db.prepare("SELECT * FROM produtos WHERE codigo_barras = ?").get(codigo_barras);
+      }
+      if (!existing && codigo_interno) {
+        existing = db.prepare("SELECT * FROM produtos WHERE codigo_interno = ?").get(codigo_interno);
+      }
+      if (!existing && nome) {
+        existing = db.prepare("SELECT * FROM produtos WHERE LOWER(TRIM(nome)) = LOWER(TRIM(?))").get(nome);
+      }
+
+      if (existing && atualizarExistentes) {
+        const prodAtualizado = {
+          ...existing,
+          nome,
+          marca: marca || existing.marca,
+          categoria: categoria || existing.categoria,
+          sabor: sabor || existing.sabor || "",
+          peso: peso || existing.peso || "",
+          codigo_interno: codigo_interno || existing.codigo_interno,
+          codigo_barras: codigo_barras || existing.codigo_barras,
+          custo: custo > 0 ? custo : existing.custo,
+          venda: venda > 0 ? venda : existing.venda,
+          estoque: estoque !== undefined && !isNaN(estoque) ? estoque : existing.estoque,
+          minimo: minimo > 0 ? minimo : existing.minimo,
+          foto: foto || existing.foto,
+          updated_at: now,
+        };
+
+        updateStmt.run(
+          prodAtualizado.nome,
+          prodAtualizado.marca,
+          prodAtualizado.categoria,
+          prodAtualizado.sabor,
+          prodAtualizado.peso,
+          prodAtualizado.codigo_interno,
+          prodAtualizado.codigo_barras,
+          prodAtualizado.custo,
+          prodAtualizado.venda,
+          prodAtualizado.estoque,
+          prodAtualizado.minimo,
+          prodAtualizado.foto,
+          now,
+          existing.id
+        );
+
+        FirestoreSyncService.saveProduto(prodAtualizado);
+        atualizados++;
+      } else if (!existing) {
+        nextAvailableId++;
+        const newId = nextAvailableId;
+        const novoProduto = {
+          id: newId,
+          nome,
+          marca,
+          categoria,
+          sabor,
+          peso,
+          codigo_interno,
+          codigo_barras,
+          custo: Math.max(0, custo),
+          venda: Math.max(0, venda),
+          estoque: Math.max(0, estoque),
+          minimo: Math.max(1, minimo),
+          foto,
+          created_at: now,
+          updated_at: now,
+        };
+
+        insertStmt.run(
+          newId,
+          novoProduto.nome,
+          novoProduto.marca,
+          novoProduto.categoria,
+          novoProduto.sabor,
+          novoProduto.peso,
+          novoProduto.codigo_interno,
+          novoProduto.codigo_barras,
+          novoProduto.custo,
+          novoProduto.venda,
+          novoProduto.estoque,
+          novoProduto.minimo,
+          novoProduto.foto,
+          now,
+          now
+        );
+
+        FirestoreSyncService.saveProduto(novoProduto);
+        inseridos++;
+      } else {
+        ignorados++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Importação concluída com sucesso: ${inseridos} inserido(s), ${atualizados} atualizado(s) e ${ignorados} ignorado(s).`,
+      inseridos,
+      atualizados,
+      ignorados,
+      total: itens.length,
+    });
+  } catch (err: any) {
+    console.error("Erro na importação em lote:", err);
+    res.status(500).json({ error: "Erro ao processar importação: " + (err.message || err) });
+  }
+});
+
 /* ========================================================================== */
 /*                               API: ESTOQUE                                 */
 /* ========================================================================== */
@@ -621,10 +884,7 @@ app.post("/api/estoque/movimentar", authMiddleware, requireRole(["admin", "geren
 
 function canAccessSales(req: AuthRequest): boolean {
   if (!req.user) return false;
-  const ocultar = getConfigValue("ocultarVendasVendedor", "1") === "1";
-  if (req.user.role === "vendedor" && ocultar) {
-    return false;
-  }
+  // Vendedor e Operador de Caixa têm acesso completo ao PDV de vendas
   return true;
 }
 
@@ -1238,6 +1498,7 @@ app.post("/api/devedores/:id/movimento", authMiddleware, requireRole(["admin", "
 
 app.get("/api/vendedores", authMiddleware, (req: AuthRequest, res: Response) => {
   try {
+    syncVendedoresWithUsers();
     const vendedores = db.prepare("SELECT * FROM vendedores ORDER BY nome ASC").all();
     res.json(vendedores);
   } catch (err: any) {
@@ -1288,16 +1549,24 @@ app.put("/api/vendedores/:id", authMiddleware, requireRole(["admin", "gerente"])
       return;
     }
 
+    const comissaoNum = parseFloat(comissao_percentual) || 0;
     const updated = {
       ...existing,
       nome: nome.trim(),
-      comissao_percentual: parseFloat(comissao_percentual) || 0,
+      comissao_percentual: comissaoNum,
       ativo: ativo ? 1 : 0,
     };
 
     db.prepare(`
       UPDATE vendedores SET nome = ?, comissao_percentual = ?, ativo = ? WHERE id = ?
     `).run(updated.nome, updated.comissao_percentual, updated.ativo, id);
+
+    // If linked to a system user, sync commission to users table as well
+    if (existing.user_id) {
+      db.prepare(`
+        UPDATE users SET comissao_percentual = ?, ativo = ? WHERE id = ?
+      `).run(comissaoNum, updated.ativo, existing.user_id);
+    }
 
     FirestoreSyncService.saveVendedor(updated);
 
@@ -1318,8 +1587,9 @@ app.delete("/api/vendedores/:id", authMiddleware, requireRole(["admin", "gerente
   }
 });
 
-app.get("/api/comissoes", authMiddleware, requireRole(["admin", "gerente", "vendedor"]), (req: AuthRequest, res: Response) => {
+app.get("/api/comissoes", authMiddleware, requireRole(["admin", "gerente"]), (req: AuthRequest, res: Response) => {
   try {
+    syncVendedoresWithUsers();
     const { de, ate } = req.query;
     let filter = "WHERE 1=1";
     const params: any[] = [];
@@ -1345,6 +1615,8 @@ app.get("/api/comissoes", authMiddleware, requireRole(["admin", "gerente", "vend
       return {
         id: ven.id,
         nome: ven.nome,
+        user_id: ven.user_id,
+        ativo: ven.ativo,
         qtdVendas: vendasDoVendedor.length,
         totalVendido,
         comissaoPercentual: taxa,
@@ -1353,23 +1625,17 @@ app.get("/api/comissoes", authMiddleware, requireRole(["admin", "gerente", "vend
     });
 
     const semVendedor = vendas.filter((v) => !v.vendedor_id);
-    if (semVendedor.length > 0 && req.user?.role !== "vendedor") {
+    if (semVendedor.length > 0) {
       linhas.push({
         id: 0,
         nome: "(Sem vendedor vinculado)",
+        user_id: null,
+        ativo: 1,
         qtdVendas: semVendedor.length,
         totalVendido: semVendedor.reduce((s, v) => s + v.total, 0),
         comissaoPercentual: 0,
         comissaoAPagar: 0,
       });
-    }
-
-    if (req.user?.role === "vendedor") {
-      const primeiroNome = req.user.nome.split(" ")[0].toLowerCase();
-      const minhaLinha = linhas.filter((l) => l.nome.toLowerCase().includes(primeiroNome));
-      if (minhaLinha.length > 0) {
-        linhas = minhaLinha;
-      }
     }
 
     const totalGeralComissoes = linhas.reduce((s, l) => s + l.comissaoAPagar, 0);
@@ -1381,7 +1647,7 @@ app.get("/api/comissoes", authMiddleware, requireRole(["admin", "gerente", "vend
       totalGeralVendas,
     });
   } catch (err: any) {
-    res.status(500).json({ error: "Erro ao gerar comissões." });
+    res.status(500).json({ error: "Erro ao apurar comissões." });
   }
 });
 
